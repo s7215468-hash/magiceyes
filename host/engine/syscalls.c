@@ -1061,7 +1061,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                    ring above, so re-executing the SVC would duplicate audio. Completing early is
                    safe: dsp_vqueued()'s idle-gap rebase re-syncs the producer on the next write. */
                 if (!us || g_exit || g_shutdown || dbg_stop_pending()) break;
-                usleep(us > 20000 ? 20000 : us);
+                me_guest_usleep(us > 20000 ? 20000 : us);
             }
             BIGLOCK_LOCK();
             return r; }
@@ -1683,7 +1683,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                    dur = (double)tv[0] + (double)tv[1] * 1e-6; }
         if (dur > 0.1) dur = 0.1;
         if (dur <= 0) dur = 0.001;          /* zero-timeout poll: a 1ms yield avoids pinning a core */
-        BIGLOCK_UNLOCK(); me_usleep((unsigned)(dur * 1e6)); BIGLOCK_LOCK();
+        BIGLOCK_UNLOCK(); me_guest_usleep((unsigned)(dur * 1e6)); BIGLOCK_LOCK();
         return 0;
     }
     case 168: { /* poll(fds, nfds, timeout): pipe check, else a real (lock-free) sleep */
@@ -1706,16 +1706,17 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         if (tmo == 0) return 0;            /* non-blocking */
         double dur = (tmo < 0 || tmo > 100) ? 0.1 : (double)tmo / 1000.0;
         BIGLOCK_UNLOCK();
-        me_usleep((unsigned)(dur * 1e6));
+        me_guest_usleep((unsigned)(dur * 1e6));
         BIGLOCK_LOCK();
         return 0;
     }
     case 240: { /* futex(uaddr, op, val, timeout, ...) — mask off PRIVATE_FLAG(0x80)+CLOCK_REALTIME(0x100) */
         int op = (int)(a1 & 0x7f);
         /* WAIT_BITSET(9)/WAKE_BITSET(10) behave like WAIT/WAKE for our purposes (we ignore the
-           bitset). We DO honour the timeout (a3): FUTEX_WAIT's is a RELATIVE timespec, WAIT_BITSET's
-           is ABSOLUTE (CLOCK_REALTIME if flag 0x100, else CLOCK_MONOTONIC). Compute a CLOCK_REALTIME
-           absolute deadline; NULL a3 = infinite. (Ignoring it stalled single-threaded timed waits.) */
+           bitset). We DO honour the timeout (a3): FUTEX_WAIT's is relative and WAIT_BITSET's is
+           absolute. Guest clock_gettime currently exposes the same guest clock for every id, so
+           convert an absolute value back to a guest duration, scale it to wall time, then form the
+           CLOCK_REALTIME deadline pthreads needs. NULL a3 = infinite. */
         if (op == 0 || op == 9) {
             struct timespec abst; int have = 0;
             if (a3) {
@@ -1723,11 +1724,12 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                 long long rel_ns;
                 if (op == 0) rel_ns = (long long)gt[0] * 1000000000LL + gt[1];   /* relative */
                 else {                                                            /* absolute */
-                    struct timespec now;
-                    clock_gettime((a1 & 0x100) ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
-                    rel_ns = ((long long)gt[0] - now.tv_sec) * 1000000000LL + ((long long)gt[1] - now.tv_nsec);
+                    double now = guest_now();
+                    long long now_ns = (long long)(now * 1000000000.0);
+                    rel_ns = (long long)gt[0] * 1000000000LL + gt[1] - now_ns;
                 }
                 if (rel_ns < 0) rel_ns = 0;
+                rel_ns = (long long)((double)rel_ns / guest_clock_rate());
                 struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
                 long long t = (long long)now.tv_sec * 1000000000LL + now.tv_nsec + rel_ns;
                 abst.tv_sec = (time_t)(t / 1000000000LL); abst.tv_nsec = (long)(t % 1000000000LL);
@@ -1866,7 +1868,7 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
         double dur = (double)ts[0] + (double)ts[1] * 1e-9;
         if (dur > 0.1) dur = 0.1;
         if (dur > 0) { BIGLOCK_UNLOCK();
-                       me_usleep((unsigned)(dur * 1e6));
+                       me_guest_usleep((unsigned)(dur * 1e6));
                        BIGLOCK_LOCK(); }
         return 0;
     }

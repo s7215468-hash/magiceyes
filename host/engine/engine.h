@@ -79,6 +79,7 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 
 void die(const char *m, uc_err e);
 void me_usleep(unsigned us);   /* sleep, low CPU (Windows usleep is ~15ms-granular) */
+void me_guest_usleep(unsigned us); /* guest-duration sleep, scaled by the guest clock rate */
 void me_platform_init(void);   /* one-time host setup (Windows: timer res + no EcoQoS throttling) */
 void me_platform_shutdown(void); /* undo process-wide setup when embedded (otherwise a no-op) */
 
@@ -223,13 +224,16 @@ void present_active(void);
 void mlc_latch_pending(void);   /* commit a half-written MLC scanout address pair */
 void gp2x_cacheflush(uint32_t guest);   /* cacheflush(r3=fb base) -> present that buffer */
 double host_now(void);
-/* The GUEST's clock: host time plus a constant skew, 0 except after a savestate restore. Every
-   time value a game can observe (gettimeofday, clock_gettime, time, times, alarm, TCOUNT, the
-   audio/DSP pacing epochs) must read through these, so a restored state resumes at the instant
-   it was saved instead of jumping forward. Host pacing stays on host_now(). See devices.c. */
-extern double g_clock_skew;
+/* The GUEST's clock can run faster than wall time for frontend fast-forward, and can be rebased
+   by a savestate restore. Every observable guest time must read through these helpers. Clock
+   rate changes and adjustments are made while all guest CPUs are parked. See devices.c. */
 double guest_now(void);
 void   guest_timeofday(struct timeval *tv);
+double guest_clock_rate(void);
+void   guest_clock_set_rate(double rate);
+void   guest_clock_adjust(double seconds);
+void   guest_clock_restore(double saved_time);
+void   guest_clock_reset(void);
 void aud_drain(void);
 uint32_t aud_free(void);
 long dsp_write(uint32_t gbuf, uint32_t n);

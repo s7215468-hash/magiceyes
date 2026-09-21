@@ -841,11 +841,11 @@ double host_now(void) {
 }
 
 /* ---- the guest's clock ------------------------------------------------------
- * Everything the GUEST can observe as a time reads through guest_now()/guest_timeofday(),
- * which are host time plus a constant skew. The skew is 0 for a normal run and is set exactly
- * once, by a savestate restore, to (time when the state was saved) - (time now).
+ * Everything the GUEST can observe as a time reads through guest_now()/guest_timeofday(). At
+ * normal speed this is host time plus a constant skew. During frontend fast-forward the clock
+ * rate is raised while preserving continuity; a savestate restore rebases it to the saved time.
  *
- * Why one global skew rather than rebasing each epoch (g_tcount_t0, g_aud_t0, g_prod_t0,
+ * Why one global transform rather than rebasing each epoch (g_tcount_t0, g_aud_t0, g_prod_t0,
  * g_alarm_at) individually: rebasing those fixes the engine's own bookkeeping but not the
  * game's. A title that stashed an absolute gettimeofday() in its OWN memory at level start --
  * and plenty do, for elapsed-time HUDs and timeouts -- would come back from a restore and see a
@@ -859,8 +859,34 @@ double host_now(void) {
  * not move when the guest's clock does. spin_throttle() is the exception that proves the rule --
  * it is pure delta detection, but it compares against a `now` its CALLERS read, so it has to
  * read the same clock they do or a restore would hand it one skew-sized bogus delta. */
-double g_clock_skew = 0.0;
-double guest_now(void) { return host_now() + g_clock_skew; }
+static volatile double g_clock_rate = 1.0;
+static volatile double g_clock_skew = 0.0;
+double guest_now(void) {
+    double rate = g_clock_rate;
+    return host_now() * rate + g_clock_skew;
+}
+double guest_clock_rate(void) { return g_clock_rate; }
+void guest_clock_set_rate(double rate) {
+    if (rate <= 0.0) rate = 1.0;
+    double now = host_now();
+    double current = now * g_clock_rate + g_clock_skew;
+    g_clock_skew = current - now * rate;
+    g_clock_rate = rate;
+}
+void guest_clock_adjust(double seconds) { g_clock_skew += seconds; }
+void guest_clock_restore(double saved_time) {
+    g_clock_skew = saved_time - host_now() * g_clock_rate;
+}
+void guest_clock_reset(void) {
+    g_clock_rate = 1.0;
+    g_clock_skew = 0.0;
+}
+void me_guest_usleep(unsigned us) {
+    double rate = guest_clock_rate();
+    unsigned host_us = (unsigned)((double)us / (rate > 0.0 ? rate : 1.0));
+    if (us && !host_us) host_us = 1;
+    me_usleep(host_us);
+}
 void guest_timeofday(struct timeval *tv) {
     double t = guest_now();
     tv->tv_sec  = (time_t)t;
@@ -1318,7 +1344,7 @@ static void spin_throttle(double now) {
     static __thread double last = 0;
     static __thread int streak = 0;
     if (now - last < 5e-6) {
-        if (++streak >= 100) { me_usleep(500); streak = 0;
+        if (++streak >= 100) { me_guest_usleep(500); streak = 0;
                                last = guest_now(); return; }
     } else streak = 0;
     last = now;
@@ -1528,7 +1554,7 @@ void devices_state_save(struct sbuf *b) {
     sb_u32(b, g_blt.size);    sb_u32(b, g_blt.ctrl);
     /* audio format + the two pacing models. The epochs go over VERBATIM: they are guest-clock
        values and guest_now() is rebased on restore, so they stay continuous with no arithmetic
-       here (see the g_clock_skew note above). */
+       here (see the guest-clock note above). */
     sb_u32(b, g_aud_freq); sb_u32(b, g_aud_ch); sb_u32(b, g_aud_bits);
     sb_f64(b, g_aud_t0); sb_u32(b, (uint32_t)g_aud_on);
     sb_u32(b, (uint32_t)g_prod_on); sb_f64(b, g_prod_t0); sb_u64(b, g_prod_bytes);

@@ -11,6 +11,7 @@ static const char *g_system_dir, *g_save_dir;
 static unsigned g_frames, g_nonzero;
 static unsigned long long g_audio_frames;
 static unsigned g_geometry_updates;
+static bool g_fastforward;
 
 static bool RETRO_CALLCONV environment(unsigned cmd, void *data) {
     switch (cmd) {
@@ -38,7 +39,7 @@ static bool RETRO_CALLCONV environment(unsigned cmd, void *data) {
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
         *(bool *)data = false; return true;
     case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
-        *(bool *)data = getenv("ME_LIBRETRO_FASTFORWARD") != NULL; return true;
+        *(bool *)data = g_fastforward; return true;
     default:
         return false;
     }
@@ -105,6 +106,8 @@ int main(int argc, char **argv) {
         int runs = getenv("ME_LIBRETRO_RESET_TEST") ? 600 : 360;
         void *state = NULL; size_t state_size = 0;
         for (int i = 0; i < runs; i++) {
+            g_fastforward = getenv("ME_LIBRETRO_FASTFORWARD") != NULL ||
+                (getenv("ME_LIBRETRO_FASTFORWARD_TOGGLE") && i >= 120 && i < 240);
             retro_run();
             if (i == 180 && getenv("ME_LIBRETRO_RESET_TEST")) retro_reset();
             if (i == 180 && getenv("ME_LIBRETRO_STATE_TEST")) {
@@ -123,6 +126,7 @@ int main(int argc, char **argv) {
             if (i == 180 && getenv("ME_LIBRETRO_PAUSE_TEST")) usleep(500000);
             else if (getenv("ME_LIBRETRO_ASYNC")) usleep(16667);
         }
+        g_fastforward = false;
         free(state);
         retro_unload_game();
         printf("game=%s callbacks=%u nonzero=%u audio_frames=%llu geometry=%u\n",

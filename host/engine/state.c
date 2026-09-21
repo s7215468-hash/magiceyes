@@ -691,7 +691,7 @@ uint32_t engine_restore_state_apply(const char *path) {
     /* The guest clock, before anything reads it. Every absolute time the guest can see -- TCOUNT,
        gettimeofday, the audio and DSP epochs, alarm, and timestamps the game itself stored --
        becomes continuous across the load because they all go through guest_now(). */
-    g_clock_skew = g_restore_guest_clock - host_now();
+    guest_clock_restore(g_restore_guest_clock);
 
     /* The main uc. Its kuser page is a registry region carrying the live TLS word, so it is
        mapped BY POINTER (uc_map_all_shared) rather than given a fresh private copy. */

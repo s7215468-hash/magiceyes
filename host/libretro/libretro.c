@@ -15,7 +15,8 @@
 #define OUTPUT_RATE 44100u
 #define MAX_AUDIO_OUT 16384u
 #define FRAME_SECONDS (1.0 / 60.0)
-#define FASTFORWARD_BUDGET (FRAME_SECONDS / 4.0)
+#define FASTFORWARD_RATE 4.0
+#define FASTFORWARD_BUDGET (FRAME_SECONDS / FASTFORWARD_RATE)
 /* libretro requires a stable size for the whole content session. The emulated machines expose
    at most 64MB of physical RAM in the currently-supported paths; the compressed MST plus CPU,
    device and adapter records fit below this with headroom. Oversize states fail explicitly. */
@@ -44,6 +45,7 @@ static int16_t audio_out[MAX_AUDIO_OUT * 2];
 static size_t audio_pending;
 static double paused_at;
 static int timing_synchronized = 1;
+static volatile int fastforward_active;
 static int pointer_enabled = 1;
 static int controller_enabled = 1;
 static unsigned video_width, video_height;
@@ -120,9 +122,17 @@ static void resume_guest(void) {
     if (!core_paused) return;
     /* Guest-observable clocks stop between frontend callbacks. This is what makes frame advance
        advance one slice instead of including however long the frontend menu stayed open. */
-    g_clock_skew -= host_now() - paused_at;
+    guest_clock_adjust(-(host_now() - paused_at) * guest_clock_rate());
     core_paused = 0;
     dbg_resume();
+}
+
+static void leave_fastforward(void) {
+    if (!fastforward_active) return;
+    if (!core_paused && !pause_guest(0)) return;
+    guest_clock_set_rate(1.0);
+    fastforward_active = 0;
+    core_log(RETRO_LOG_INFO, "magiceyes: fast-forward disabled\n");
 }
 
 static void *engine_entry(void *unused) {
@@ -148,7 +158,8 @@ static void *monitor_entry(void *unused) {
         uint64_t now_seen = run_heartbeat;
         double now = host_now();
         if (now_seen != seen) { seen = now_seen; changed = now; }
-        if (!timing_synchronized && seen && !core_paused && now - changed > 0.12) {
+        if ((!timing_synchronized || fastforward_active) && seen && !core_paused &&
+            now - changed > 0.12) {
             pause_guest(0);
         }
         me_usleep(10000);
@@ -373,6 +384,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
 
     engine_thread_done = 0;
     g_engine_ready = 0;       /* clear the previous session before the new thread is scheduled */
+    guest_clock_reset();
     audio_phase = 0; audio_pending = 0;
     video_width = video_height = 0;
     update_variables();
@@ -392,7 +404,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
         dbg_set_quantum(0);
         return false;
     }
-    monitor_stop = core_paused = 0;
+    monitor_stop = core_paused = fastforward_active = 0;
     run_heartbeat = 0;
     if (timing_synchronized && !pause_guest(1)) {
         engine_request_shutdown();
@@ -416,6 +428,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
 
 RETRO_API void retro_unload_game(void) {
     if (!engine_thread_valid) return;
+    leave_fastforward();
     monitor_stop = 1;
     pthread_join(monitor_thread, NULL);
     engine_request_shutdown();
@@ -425,6 +438,8 @@ RETRO_API void retro_unload_game(void) {
     engine_thread_done = 0;
     audio_phase = 0;
     audio_pending = 0;
+    fastforward_active = 0;
+    guest_clock_reset();
     dbg_set_quantum(0);
     if (state_path[0]) remove(state_path);
     state_path[0] = 0;
@@ -434,6 +449,7 @@ RETRO_API void retro_deinit(void) { retro_unload_game(); }
 
 RETRO_API void retro_reset(void) {
     if (!engine_thread_valid || !content_path[0]) return;
+    leave_fastforward();
     resume_guest();
     g_engine_ready = 0;
     engine_request_reload(content_path);
@@ -460,6 +476,7 @@ RETRO_API void retro_run(void) {
                 if (!pause_guest(0)) timing_synchronized = 0;
                 else dbg_set_quantum(50000);
             } else {
+                leave_fastforward();
                 dbg_set_quantum(0);
                 resume_guest();
             }
@@ -469,23 +486,37 @@ RETRO_API void retro_run(void) {
     update_input();
     shm->viewer_heartbeat++;
     if (timing_synchronized) {
-        if (!core_paused) pause_guest(0);
         bool fastforward = false;
         if (environ_cb) environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward);
-        resume_guest();
-        double budget = fastforward ? FASTFORWARD_BUDGET : FRAME_SECONDS;
-        double started = host_now();
-        /* A fast-forward callback still represents one emulated 60 Hz frame. Give the CPU a
-           shorter wall-time budget, but advance its observable clock by the balance up front so
-           timer-driven games do real work rather than seeing a succession of near-zero deltas. */
-        g_clock_skew += FRAME_SECONDS - budget;
-        if (fastforward) present_uncap();
-        double until = started + budget;
-        while (!engine_thread_done && host_now() < until) me_usleep(500);
-        if (pause_guest(0)) {
-            /* Include quantum/parking latency in the accounting, then correct it away so every
-               callback advances guest time by exactly one frame even on a busy host. */
-            g_clock_skew += budget - (paused_at - started);
+        if (fastforward) {
+            if (!fastforward_active) {
+                if (!core_paused) pause_guest(0);
+                if (core_paused) {
+                    guest_clock_set_rate(FASTFORWARD_RATE);
+                    fastforward_active = 1;
+                    core_log(RETRO_LOG_INFO, "magiceyes: fast-forward enabled (%.0fx)\n",
+                             FASTFORWARD_RATE);
+                }
+            }
+        } else leave_fastforward();
+        if (fastforward_active) {
+            /* Keep the CPUs running between callbacks. Parking every 4 ms starves titles with
+               several guest threads and turns fast-forward into repeated partial CPU slices.
+               The heartbeat watchdog parks them if callbacks stop (menu/pause). */
+            resume_guest();
+            present_uncap();
+            double until = host_now() + FASTFORWARD_BUDGET;
+            while (!engine_thread_done && host_now() < until) me_usleep(250);
+        } else {
+            if (!core_paused) pause_guest(0);
+            resume_guest();
+            double started = host_now();
+            double until = started + FRAME_SECONDS;
+            while (!engine_thread_done && host_now() < until) me_usleep(500);
+            if (pause_guest(0)) {
+                /* Correct scheduler/parking latency so one callback is exactly one guest frame. */
+                guest_clock_adjust(FRAME_SECONDS - (paused_at - started));
+            }
         }
     } else {
         resume_guest();

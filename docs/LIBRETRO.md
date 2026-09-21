@@ -51,8 +51,9 @@ miniz implementation, with absolute paths and traversal entries rejected; no hos
 
 - **Timing model — Synchronized (default):** `retro_run()` grants the guest one 60 Hz slice and
   stops guest CPU execution before returning. Pausing or frame-advancing the frontend therefore
-  does not let the guest run ahead. During frontend fast-forward, each callback still advances
-  guest time by one frame while the CPU slice uses a shorter wall-time budget.
+  does not let the guest run ahead. During frontend fast-forward, the guest clock and guest-side
+  waits run at 4x and the CPU stays active between callbacks; a heartbeat watchdog still parks it
+  if callbacks stop. Returning to normal speed restores the parked, one-slice-per-callback model.
 - **Timing model — Asynchronous:** preserves the standalone engine's free-running behavior. A
   watchdog still parks the guest when frontend callbacks stop. This can be useful for diagnosing
   a title that depends on unusual host timing.
@@ -88,6 +89,7 @@ tools/test/libretro_smoke.sh GAME.gpe SYSTEM_DIR SAVE_DIR [SECOND_GAME.gpe]
 
 Set `ME_LIBRETRO_FAIL_FIRST=1`, `ME_LIBRETRO_PAUSE_TEST=1`,
 `ME_LIBRETRO_RESET_TEST=1`, `ME_LIBRETRO_STATE_TEST=1`,
-`ME_LIBRETRO_PARTIAL_AUDIO=1`, `ME_LIBRETRO_FASTFORWARD=1` or `ME_LIBRETRO_ASYNC=1` to exercise
-failure recovery, frontend pausing, core reset, state round-tripping, partial audio consumption,
-fast-forward or asynchronous timing.
+`ME_LIBRETRO_PARTIAL_AUDIO=1`, `ME_LIBRETRO_FASTFORWARD=1`,
+`ME_LIBRETRO_FASTFORWARD_TOGGLE=1` or `ME_LIBRETRO_ASYNC=1` to exercise failure recovery,
+frontend pausing, core reset, state round-tripping, partial audio consumption, sustained or
+on/off fast-forward, or asynchronous timing.
