@@ -13,7 +13,9 @@
 #endif
 
 #define OUTPUT_RATE 44100u
+#define OUTPUT_FPS 60u
 #define MAX_AUDIO_OUT 16384u
+#define AUDIO_PREBUFFER_MS 20u
 #define FRAME_SECONDS (1.0 / 60.0)
 #define FASTFORWARD_RATE 4.0
 #define FASTFORWARD_BUDGET (FRAME_SECONDS / FASTFORWARD_RATE)
@@ -41,8 +43,12 @@ static char content_path[PATH_MAX];
 static char engine_argv0[PATH_MAX];
 static char state_path[PATH_MAX];
 static uint64_t audio_phase;
+static uint32_t audio_budget_phase;
 static int16_t audio_out[MAX_AUDIO_OUT * 2];
 static size_t audio_pending;
+static int16_t audio_hold_l, audio_hold_r;
+static int audio_have_hold, audio_started;
+static uint32_t audio_seen_freq, audio_seen_fmt, audio_seen_channels;
 static double paused_at;
 static int timing_synchronized = 1;
 static volatile int fastforward_active;
@@ -224,6 +230,15 @@ static int16_t pcm_sample(const uint8_t *p, unsigned bits, int is_signed) {
     return is_signed ? (int16_t)u : (int16_t)((int)u - 32768);
 }
 
+static void reset_audio_stream(int reset_budget) {
+    audio_phase = 0;
+    audio_pending = 0;
+    audio_hold_l = audio_hold_r = 0;
+    audio_have_hold = audio_started = 0;
+    audio_seen_freq = audio_seen_fmt = audio_seen_channels = 0;
+    if (reset_budget) audio_budget_phase = 0;
+}
+
 static void submit_audio(void) {
     if (!audio_pending) return;
     if (audio_batch_cb != null_audio_batch) {
@@ -241,45 +256,88 @@ static void submit_audio(void) {
 }
 
 static void drain_audio(void) {
-    submit_audio();
-    if (audio_pending) return;   /* frontend backpressure: preserve samples for the next callback */
     uint32_t freq = g_shm->audio_freq;
     unsigned ch = g_shm->audio_channels;
     uint32_t fmt = g_shm->audio_format;
-    if (!g_shm->audio_active || !freq || (ch != 1 && ch != 2)) return;
     unsigned bits = fmt & 0xffu;
-    if (bits != 8 && bits != 16) return;
+    if (!g_shm->audio_active || !freq || (ch != 1 && ch != 2) ||
+        (bits != 8 && bits != 16)) {
+        reset_audio_stream(1);
+        return;
+    }
+    if (freq != audio_seen_freq || fmt != audio_seen_fmt || ch != audio_seen_channels) {
+        reset_audio_stream(0);
+        audio_seen_freq = freq;
+        audio_seen_fmt = fmt;
+        audio_seen_channels = ch;
+    }
+    /* A frontend may accept only part of a batch. Give it at most one batch per retro_run(),
+       and never consume more guest PCM while an older batch is still backpressured. */
+    if (audio_pending) {
+        submit_audio();
+        return;
+    }
     unsigned bytes_per = bits / 8;
     unsigned frame_bytes = ch * bytes_per;
     uint32_t avail = g_shm->a_write - g_shm->a_read;
     avail -= avail % frame_bytes;
     /* Keep latency bounded after a slow frontend frame by dropping all but the newest 250ms. */
     uint32_t keep = freq * frame_bytes / 4;
-    if (avail > keep) { g_shm->a_read += avail - keep; avail = keep; }
+    if (avail > keep) {
+        uint32_t drop = avail - keep;
+        drop -= drop % frame_bytes;
+        g_shm->a_read += drop;
+        avail -= drop;
+        /* The held sample preceded the retained tail and can no longer be repeated safely. */
+        audio_phase = 0;
+        audio_have_hold = 0;
+    }
+
+    /* Let the producer establish a small real-audio cushion before starting. From then on the
+       frontend receives one clocked batch per callback; only a genuine underrun is silenced. */
+    if (!audio_started) {
+        uint32_t prebuffer = freq * frame_bytes * AUDIO_PREBUFFER_MS / 1000u;
+        if (prebuffer < frame_bytes) prebuffer = frame_bytes;
+        prebuffer -= prebuffer % frame_bytes;
+        if (avail < prebuffer) return;
+        audio_started = 1;
+    }
+
+    audio_budget_phase += OUTPUT_RATE;
+    size_t target = audio_budget_phase / OUTPUT_FPS;
+    audio_budget_phase %= OUTPUT_FPS;
+    if (target > MAX_AUDIO_OUT) target = MAX_AUDIO_OUT;
 
     uint32_t r = g_shm->a_read;
     uint32_t source_frames = avail / frame_bytes;
     size_t out_n = 0;
     uint32_t used_source = 0;
     int is_signed = (fmt & 0x8000u) != 0;
-    for (uint32_t i = 0; i < source_frames && out_n < MAX_AUDIO_OUT; i++) {
-        uint8_t raw[4] = {0};
-        for (unsigned k = 0; k < frame_bytes; k++)
-            raw[k] = g_shm->aring[(r + i * frame_bytes + k) % GP2XSHM_ARING];
-        int16_t l = pcm_sample(raw, bits, is_signed);
-        int16_t rr = ch == 2 ? pcm_sample(raw + bytes_per, bits, is_signed) : l;
-        audio_phase += OUTPUT_RATE;
-        while (audio_phase >= freq && out_n < MAX_AUDIO_OUT) {
-            audio_phase -= freq;
-            audio_out[out_n * 2] = l;
-            audio_out[out_n * 2 + 1] = rr;
-            out_n++;
+    while (out_n < target) {
+        /* audio_phase is source time in OUTPUT_RATE units. Advance the held source sample
+           whenever the next output position crosses a source-frame boundary. Keeping the held
+           sample across callbacks avoids a click at odd batch boundaries when upsampling. */
+        while (!audio_have_hold || audio_phase >= OUTPUT_RATE) {
+            if (used_source >= source_frames) goto underrun;
+            uint8_t raw[4] = {0};
+            for (unsigned k = 0; k < frame_bytes; k++)
+                raw[k] = g_shm->aring[(r + used_source * frame_bytes + k) % GP2XSHM_ARING];
+            audio_hold_l = pcm_sample(raw, bits, is_signed);
+            audio_hold_r = ch == 2 ? pcm_sample(raw + bytes_per, bits, is_signed) : audio_hold_l;
+            used_source++;
+            if (audio_have_hold) audio_phase -= OUTPUT_RATE;
+            else audio_have_hold = 1;
         }
-        used_source = i + 1;
-        if (out_n == MAX_AUDIO_OUT) break;
+        audio_out[out_n * 2] = audio_hold_l;
+        audio_out[out_n * 2 + 1] = audio_hold_r;
+        out_n++;
+        audio_phase += freq;
     }
+underrun:
     g_shm->a_read = r + used_source * frame_bytes;
-    audio_pending = out_n;
+    if (out_n < target)
+        memset(audio_out + out_n * 2, 0, (target - out_n) * 2 * sizeof *audio_out);
+    audio_pending = target;
     submit_audio();
 }
 
@@ -385,7 +443,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     engine_thread_done = 0;
     g_engine_ready = 0;       /* clear the previous session before the new thread is scheduled */
     guest_clock_reset();
-    audio_phase = 0; audio_pending = 0;
+    reset_audio_stream(1);
     video_width = video_height = 0;
     update_variables();
     dbg_set_quantum(timing_synchronized ? 50000 : 0);
@@ -436,8 +494,7 @@ RETRO_API void retro_unload_game(void) {
     shm_shutdown();
     engine_thread_valid = 0;
     engine_thread_done = 0;
-    audio_phase = 0;
-    audio_pending = 0;
+    reset_audio_stream(1);
     fastforward_active = 0;
     guest_clock_reset();
     dbg_set_quantum(0);
@@ -451,6 +508,7 @@ RETRO_API void retro_reset(void) {
     if (!engine_thread_valid || !content_path[0]) return;
     leave_fastforward();
     resume_guest();
+    reset_audio_stream(1);
     g_engine_ready = 0;
     engine_request_reload(content_path);
     for (int i = 0; i < 6000 && !engine_thread_done && g_engine_ready == 0; i++) me_usleep(10000);
@@ -553,7 +611,6 @@ static uint32_t get_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static void put_u64(uint8_t *p, uint64_t v) { put_u32(p, (uint32_t)v); put_u32(p + 4, (uint32_t)(v >> 32)); }
-static uint64_t get_u64(const uint8_t *p) { return get_u32(p) | ((uint64_t)get_u32(p + 4) << 32); }
 
 RETRO_API size_t retro_serialize_size(void) { return LIBRETRO_STATE_BYTES; }
 
@@ -625,7 +682,9 @@ RETRO_API bool retro_unserialize(const void *data, size_t size) {
         core_log(RETRO_LOG_ERROR, "magiceyes: unserialize did not complete\n");
         return false;
     }
-    audio_phase = get_u64(in + 16);
+    /* Device restore deliberately discards queued ring PCM, so restart source-side resampling
+       after the already-normalized frontend batch saved below has been accepted. */
+    reset_audio_stream(1);
     audio_pending = pending;
     memcpy(audio_out, in + LIBRETRO_STATE_HEADER, audio_pending * 4);
     return true;

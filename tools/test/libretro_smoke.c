@@ -10,6 +10,8 @@
 static const char *g_system_dir, *g_save_dir;
 static unsigned g_frames, g_nonzero;
 static unsigned long long g_audio_frames;
+static unsigned g_audio_calls;
+static size_t g_max_audio_batch;
 static unsigned g_geometry_updates;
 static bool g_fastforward;
 
@@ -55,6 +57,8 @@ static void RETRO_CALLCONV video(const void *data, unsigned w, unsigned h, size_
 static void RETRO_CALLCONV audio(int16_t l, int16_t r) { (void)l; (void)r; g_audio_frames++; }
 static size_t RETRO_CALLCONV audio_batch(const int16_t *p, size_t n) {
     (void)p;
+    g_audio_calls++;
+    if (n > g_max_audio_batch) g_max_audio_batch = n;
     size_t used = getenv("ME_LIBRETRO_PARTIAL_AUDIO") && n > 17 ? 17 : n;
     g_audio_frames += used; return used;
 }
@@ -102,8 +106,10 @@ int main(int argc, char **argv) {
     for (int g = 0; g < games; g++) {
         struct retro_game_info gi = { g ? argv[5] : argv[2], NULL, 0, NULL };
         g_frames = g_nonzero = 0; g_audio_frames = 0; g_geometry_updates = 0;
+        g_audio_calls = 0; g_max_audio_batch = 0;
         if (!retro_load_game(&gi)) { fprintf(stderr, "load failed: %s\n", gi.path); return 1; }
         int runs = getenv("ME_LIBRETRO_RESET_TEST") ? 600 : 360;
+        if (getenv("ME_LIBRETRO_RUNS")) runs = atoi(getenv("ME_LIBRETRO_RUNS"));
         void *state = NULL; size_t state_size = 0;
         for (int i = 0; i < runs; i++) {
             g_fastforward = getenv("ME_LIBRETRO_FASTFORWARD") != NULL ||
@@ -129,9 +135,15 @@ int main(int argc, char **argv) {
         g_fastforward = false;
         free(state);
         retro_unload_game();
-        printf("game=%s callbacks=%u nonzero=%u audio_frames=%llu geometry=%u\n",
-               gi.path, g_frames, g_nonzero, g_audio_frames, g_geometry_updates);
+        printf("game=%s callbacks=%u nonzero=%u audio_frames=%llu audio_calls=%u"
+               " max_audio_batch=%zu geometry=%u\n",
+               gi.path, g_frames, g_nonzero, g_audio_frames, g_audio_calls,
+               g_max_audio_batch, g_geometry_updates);
         if (!g_frames || !g_geometry_updates) return 1;
+        if (g_max_audio_batch > 735 || g_audio_frames > (unsigned long long)runs * 735) {
+            fprintf(stderr, "audio pacing exceeded the 44.1kHz/60Hz callback budget\n");
+            return 1;
+        }
     }
     retro_deinit();
     dlclose(lib);

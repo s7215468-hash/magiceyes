@@ -60,8 +60,9 @@ miniz implementation, with absolute paths and traversal entries rejected; no hos
 - **Pointer/touch input:** enables or disables mapping libretro pointer coordinates to the
   emulated touchscreen.
 
-The reported geometry follows the active title if it changes resolution. The audio adapter also
-retains samples a frontend only partially consumes instead of dropping the remainder.
+The reported geometry follows the active title if it changes resolution. The audio adapter clocks
+44.1 kHz output against the 60 Hz frontend cadence, retains samples a frontend only partially
+consumes, and keeps the guest-side mixer buffered instead of draining it in bursts.
 
 ## Save states
 
@@ -92,4 +93,6 @@ Set `ME_LIBRETRO_FAIL_FIRST=1`, `ME_LIBRETRO_PAUSE_TEST=1`,
 `ME_LIBRETRO_PARTIAL_AUDIO=1`, `ME_LIBRETRO_FASTFORWARD=1`,
 `ME_LIBRETRO_FASTFORWARD_TOGGLE=1` or `ME_LIBRETRO_ASYNC=1` to exercise failure recovery,
 frontend pausing, core reset, state round-tripping, partial audio consumption, sustained or
-on/off fast-forward, or asynchronous timing.
+on/off fast-forward, or asynchronous timing. `ME_LIBRETRO_RUNS=N` overrides the default 360
+callbacks for longer pacing checks. The harness rejects audio batches or cumulative output above
+the core's 44.1 kHz / 60 Hz budget.
