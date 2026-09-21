@@ -1,0 +1,43 @@
+# Desktop libretro core build. The patched Unicorn checkout is an explicit dependency because
+# magiceyes relies on its parallel-CPU, SMC and ARM fixes (host/engine/fork-patches/README.md).
+ME_UNICORN_FORK ?= $(HOME)/me-unicorn-fork
+platform ?= unix
+
+CORE_SOURCES := $(wildcard host/engine/*.c) \
+                $(wildcard host/engine/extract/*.c) \
+                host/state_file.c host/libretro/libretro.c
+CORE_INCLUDES := -Ihost/libretro -Ihost/engine -Ihost/engine/extract -Ihost \
+                 -Iguest/src -I$(ME_UNICORN_FORK)/include
+CORE_FLAGS := -O2 -Wall -Wextra -fvisibility=hidden -DME_LIBRETRO
+
+ifeq ($(platform),win)
+  ifeq ($(origin CC),default)
+    CC := x86_64-w64-mingw32-gcc
+  endif
+  TARGET ?= magiceyes_libretro.dll
+  UNICORN_LIB := $(ME_UNICORN_FORK)/build-win/libunicorn.a
+  CORE_SOURCES += host/win/posix_compat.c
+  CORE_INCLUDES += -Ihost/win/compat
+  SHARED_FLAGS := -shared -Wl,--out-implib,magiceyes_libretro.a
+  CORE_LIBS := -static-libgcc -Wl,-Bstatic -lpthread -Wl,-Bdynamic \
+               -lm -lws2_32 -lbcrypt -lwinmm
+else
+  ifeq ($(origin CC),default)
+    CC := cc
+  endif
+  TARGET ?= magiceyes_libretro.so
+  UNICORN_LIB := $(ME_UNICORN_FORK)/build/libunicorn.a
+  CORE_FLAGS += -fPIC
+  SHARED_FLAGS := -shared -Wl,--no-undefined -Wl,--version-script=host/libretro/libretro.map
+  CORE_LIBS := -lpthread -lm -lrt
+endif
+
+.PHONY: all clean
+all: $(TARGET)
+
+$(TARGET): $(CORE_SOURCES) host/libretro/libretro.h host/libretro/libretro.map $(UNICORN_LIB)
+	$(CC) $(CORE_FLAGS) $(CORE_INCLUDES) $(SHARED_FLAGS) -o $@ \
+		$(CORE_SOURCES) $(UNICORN_LIB) $(CORE_LIBS)
+
+clean:
+	rm -f magiceyes_libretro.so magiceyes_libretro.dll magiceyes_libretro.a

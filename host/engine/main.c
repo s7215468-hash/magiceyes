@@ -15,6 +15,9 @@
 #endif
 
 FILE *g_log = NULL;   /* ME_LOGFILE diagnostic sink (see engine.h DIAG) */
+#ifdef ME_LIBRETRO
+volatile int g_engine_ready = 0;
+#endif
 
 /* ME_HEAPCHECK: validate the process heap at teardown phase boundaries to pinpoint which step
    first corrupts it (the multi-reload crash surfaces later, inside a free in uc_close). */
@@ -40,22 +43,29 @@ void me_log(const char *fmt, ...) {
 }
 
 /* chdir into the directory holding `path` so the game finds its Data/ (relative opens). */
+#ifndef ME_LIBRETRO
 static void chdir_to_dir_of(const char *path) {
     char d[PATH_MAX]; snprintf(d, sizeof d, "%s", path);
     char *s1 = strrchr(d, '/'), *s2 = strrchr(d, '\\');
     char *s = s1 > s2 ? s1 : s2;
     if (s && s != d) { *s = 0; if (ME_CHDIR(d) != 0 && g_trace) fprintf(stderr, "  [chdir %s failed]\n", d); }
 }
+#endif
 
 /* Run from the title's REAL asset dir (g_game_root). A GPEComp payload may have decompressed to
    %TEMP%, so the runnable binary's dir isn't where Data/ lives -- chdir to g_game_root instead,
    while save writes get redirected to the per-game overlay. Fall back to the binary's dir. */
 static void chdir_to_game_root(const char *bin) {
+#ifdef ME_LIBRETRO
+    (void)bin;
+    if (g_game_root[0]) snprintf(g_guest_cwd, sizeof g_guest_cwd, "%s", g_game_root);
+#else
     if (g_game_root[0] && ME_CHDIR(g_game_root) == 0) {
         if (g_trace) fprintf(stderr, "  [chdir game_root %s]\n", g_game_root);
         return;
     }
     chdir_to_dir_of(bin);
+#endif
 }
 
 uint32_t g_brk, g_brk_start;
@@ -77,6 +87,7 @@ int g_eabi  = 0;   /* current syscall ABI: 1 = EABI (svc #0), 0 = legacy OABI (s
 char g_exe_dir[PATH_MAX] = {0};   /* dir of our own executable (default rootfs search) */
 char g_game_root[PATH_MAX] = {0}; /* the running title's real asset dir (see engine.h) */
 char g_save_root[PATH_MAX] = {0}; /* <exe_dir>/saves/<gamekey>: portable per-game write overlay */
+char g_guest_cwd[PATH_MAX] = {0}; /* virtual cwd used by embedded builds */
 __thread int g_setpc = 0;   /* a syscall set PC (signal entry / sigreturn): skip R0 write */
 
 /* Firmware boot: we ran the device's gp2xmenu launcher (not a single game). On a game's exit
@@ -137,12 +148,19 @@ static void *viewer_thread(void *arg) {
 
 void die(const char *m, uc_err e) {
     fprintf(stderr, "me_unicorn: %s: %s\n", m, e ? uc_strerror(e) : "");
+#ifdef ME_LIBRETRO
+    g_engine_ready = -1;
+    engine_request_shutdown();
+    pthread_exit(NULL);                /* never terminate the frontend process */
+#else
     exit(1);
+#endif
 }
 
 #ifndef _WIN32
 void me_usleep(unsigned us) { usleep(us); }   /* Linux usleep is already high-resolution */
 void me_platform_init(void) {}                /* Linux doesn't throttle background processes */
+void me_platform_shutdown(void) {}
 #endif
 
 uint32_t gread(uint32_t reg) { uint32_t v; uc_reg_read(g_uc, reg, &v); return v; }
@@ -548,7 +566,15 @@ static uint32_t engine_restore_state_run(const char *path) {
     return entry;
 }
 uint32_t engine_restore_state(const char *path) { return engine_restore_state_run(path); }
+#ifdef ME_LIBRETRO
+int me_engine_main(int argc, char **argv) {
+    g_engine_ready = 0;
+    g_shutdown = 0; g_exit = 0; g_exit_code = 0;
+    g_reload_path[0] = 0; g_restore_path[0] = 0;
+    g_reloading = 0;
+#else
 int main(int argc, char **argv) {
+#endif
     const char *logf = getenv("ME_LOGFILE");   /* divert diagnostics to a file -- the only way to
                                                   see logs from the -mwindows bundle (no console) */
     if (logf && *logf) {
@@ -687,7 +713,9 @@ int main(int argc, char **argv) {
     { const char *rpt = getenv("ME_REPORT");
       if (rpt && *rpt)            me_report_init(rpt);
       else if (getenv("ME_DEBUG")) me_report_init("me_report.json"); }
+#ifndef ME_LIBRETRO
     atexit(syscalls_flush_all);   /* flush saved game data on every exit path (headless too) */
+#endif
     threads_init();
     shm_setup();
     /* Control channel (ME_CTL): after shm_setup so frame.get has a buffer to serve, but before the
@@ -705,14 +733,20 @@ int main(int argc, char **argv) {
         if (g_trace) fprintf(stderr, "entry=%08x brk=%08x\n", entry, g_brk);
         if (!entry) {
             fprintf(stderr, "magiceyes: failed to load '%s'\n", bin);
-#ifndef ME_BUNDLED
+#if !defined(ME_BUNDLED) && !defined(ME_LIBRETRO)
             return 1;                         /* standalone: nothing to run */
+#endif
+#ifdef ME_LIBRETRO
+            g_engine_ready = -1;
 #endif
         }                                     /* bundle: fall through to an idle window */
     }
 
     /* helper + viewer threads are created ONCE and outlive every reload / idle period */
     pthread_t helper; pthread_create(&helper, NULL, helper_thread, NULL);
+#ifdef ME_LIBRETRO
+    if (entry) g_engine_ready = 1;
+#endif
     /* TEMP diagnostic: ME_TEST_RELOAD="pathA;pathB" auto-hot-reloads through the list (every
        ME_TEST_RELOAD_SECS, default 6) — reproduces the File->Open reload chain headlessly so it
        can run under ASan/valgrind. Reuses the exact reload path the viewer's File->Open uses. */
@@ -781,12 +815,29 @@ int main(int argc, char **argv) {
         }
         if (!entry) me_usleep(16000);          /* idle: wait for File->Open or the window to close */
     }
-    g_shutdown = 1; g_exit = 1;
+    engine_request_shutdown();
+    pthread_join(helper, NULL);                            /* no helper may touch guest RAM below */
     me940_stop();                                          /* halt the second core, if running */
+    engine_stop_all_threads();
+    BIGLOCK_LOCK();
+    if (g_th[0].uc) { uc_close(g_th[0].uc); g_th[0].uc = NULL; }
+    BIGLOCK_UNLOCK();
+    mem_reset();
+    syscalls_flush_all();
+    engine_reset_globals();                                /* make the next embedded load pristine */
     if (me_report_active()) me_report_flush_json(NULL);   /* final structured run report */
 #ifdef ME_BUNDLED
     if (g_shm) g_shm->quit = 1;            /* engine done -> end the viewer loop, then it exit()s */
     pthread_join(vth, NULL);
+#endif
+    ctl_shutdown();
+#ifndef ME_LIBRETRO
+    shm_shutdown();
+#endif
+    guard_shutdown();
+    me_platform_shutdown();
+#ifdef ME_LIBRETRO
+    g_engine_ready = -1;
 #endif
     return g_exit_code;
 }

@@ -17,6 +17,7 @@
 extern char g_exe_dir[PATH_MAX];   /* absolutised in main.c; may be empty very early */
 
 static char s_override[ME_PATH_NKINDS][PATH_MAX];   /* user override; "" = portable default */
+static char s_runtime[ME_PATH_NKINDS][PATH_MAX];    /* embedding override; never read/written */
 static int  s_loaded = 0;
 
 static const char *kind_key(me_path_kind k) {
@@ -112,7 +113,8 @@ void me_paths_default(me_path_kind k, char *out, size_t cap) {
 void me_paths_dir(me_path_kind k, char *out, size_t cap) {
     load_once();
     if (k < 0 || k >= ME_PATH_NKINDS) { snprintf(out, cap, "."); return; }
-    if (s_override[k][0]) snprintf(out, cap, "%s", s_override[k]);
+    if (s_runtime[k][0])  snprintf(out, cap, "%s", s_runtime[k]);
+    else if (s_override[k][0]) snprintf(out, cap, "%s", s_override[k]);
     else                  me_paths_default(k, out, cap);
 #ifdef _WIN32
     /* Defaults join the exe dir (backslashes) with "/sub"; overrides come from the picker
@@ -128,6 +130,13 @@ int me_paths_set(me_path_kind k, const char *dir) {
     if (!dir || !dir[0]) s_override[k][0] = 0;             /* clear -> portable default */
     else { snprintf(s_override[k], PATH_MAX, "%s", dir); me_mkdirs(s_override[k]); }
     save();
+    return 0;
+}
+
+int me_paths_set_runtime(me_path_kind k, const char *dir) {
+    if (k < 0 || k >= ME_PATH_NKINDS) return -1;
+    if (!dir || !dir[0]) s_runtime[k][0] = 0;
+    else { snprintf(s_runtime[k], PATH_MAX, "%s", dir); me_mkdirs(s_runtime[k]); }
     return 0;
 }
 

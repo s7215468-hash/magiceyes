@@ -7,7 +7,7 @@
  * bin/magiceyes-dev.exe get it; bin/magiceyes.exe does not. */
 #include "engine.h"
 
-#if defined(ME_BUNDLED) && !defined(ME_DEV)
+#if (defined(ME_BUNDLED) && !defined(ME_DEV)) || defined(ME_LIBRETRO)
 void ctl_init(void) {}          /* release bundle: no control channel, by design */
 void ctl_shutdown(void) {}
 #else

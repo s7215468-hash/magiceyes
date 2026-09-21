@@ -152,6 +152,13 @@ the emulator) and a per-platform **host** side (the CPU engine + the SDL2 viewer
 The full architecture, the device hardware contract, and every hard-won gotcha live in
 [`CLAUDE.md`](CLAUDE.md); the roadmap is in [`TODOS.md`](TODOS.md).
 
+### Experimental libretro core
+
+A desktop libretro target is available on source builds. It uses the frontend for RGB565 video,
+audio, RetroPad input and Caanoo pointer input, without linking the SDL viewer. Build and runtime
+layout instructions are in [`docs/LIBRETRO.md`](docs/LIBRETRO.md). Frontend save states, rewind,
+runahead and deterministic netplay are not enabled yet.
+
 ## Legal
 
 magiceyes is a clean-room reimplementation of the GP2X/Wiz/Caanoo SDL, DRM, and device

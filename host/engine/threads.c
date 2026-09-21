@@ -14,6 +14,7 @@ __thread struct thread *g_self;      /* the calling host thread's guest-thread r
 
 struct thread g_th[MAXTH];
 int g_nth = 0, g_next_tid = 100;
+static int g_threads_initialized = 0;
 int g_threaddump = 0;
 
 /* defined below; forward-declared so thread_entry's crash path can wake a sigsuspended thread */
@@ -312,7 +313,9 @@ void sigsuspend_wait(void) {
         g_self->tid, (unsigned long long)g_self->sig_pending);
 }
 
-void threads_init(void) { fxq_init(); }
+void threads_init(void) {
+    if (!g_threads_initialized) { fxq_init(); g_threads_initialized = 1; }
+}
 
 /* Stop + join every guest WORKER thread (i>=1). Called on the engine main thread while NOT
    holding g_biglock, by the reset/reload primitive. CPU-bound workers are forced out of
@@ -328,7 +331,7 @@ void engine_stop_all_threads(void) {
     for (int i = 1; i < g_nth; i++)
         if (g_th[i].uc && g_th[i].state != TH_DEAD) uc_emu_stop(g_th[i].uc);
     BIGLOCK_UNLOCK();
-    futex_wake_all();
+    if (g_threads_initialized) futex_wake_all();
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
     /* TWO passes, deliberately: (1) JOIN every worker, THEN (2) close every uc. uc_close mutates
        process-global qemu state (address-space teardown, etc.); doing it interleaved -- close
@@ -376,6 +379,18 @@ void engine_request_reload(const char *host_path) {
     for (int i = 0; i < g_nth; i++) if (g_th[i].uc) uc_emu_stop(g_th[i].uc);
     BIGLOCK_UNLOCK();
     futex_wake_all();
+    pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
+}
+
+void engine_request_shutdown(void) {
+    dbg_force_resume();
+    BIGLOCK_LOCK();
+    g_shutdown = 1;
+    g_exit = 1;
+    for (int i = 0; i < g_nth; i++) if (g_th[i].uc) uc_emu_stop(g_th[i].uc);
+    BIGLOCK_UNLOCK();
+    if (g_shm) g_shm->quit = 1;
+    if (g_threads_initialized) futex_wake_all();
     pthread_mutex_lock(&g_sigm); pthread_cond_broadcast(&g_sigc); pthread_mutex_unlock(&g_sigm);
 }
 

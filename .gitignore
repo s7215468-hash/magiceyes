@@ -4,6 +4,8 @@ rootfs/
 tmp_dyn/
 *.o
 *.so*
+/magiceyes_libretro.a
+/magiceyes_libretro.dll
 __pycache__/
 *.pyc
 .pytest_cache/

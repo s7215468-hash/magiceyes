@@ -10,6 +10,8 @@
 *.json text eol=lf
 *.toml text eol=lf
 *.ini  text eol=lf
+*.info text eol=lf
+*.map  text eol=lf
 *.txt  text eol=lf
 *.lock text eol=lf
 # read line-by-line by build_release.sh / apply_and_build.sh: a CRLF checkout would put a
@@ -19,6 +21,7 @@
 LICENSE        text eol=lf
 .gitignore     text eol=lf
 .gitattributes text eol=lf
+Makefile*      text eol=lf
 
 # SVG is checked in as source (the README banner) -- keep it LF too.
 *.svg text eol=lf

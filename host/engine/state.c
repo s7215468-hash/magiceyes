@@ -9,7 +9,21 @@
 #define ME_VERSION "0.2.0-dev"   /* release builds inject the tag; matches main.c */
 #endif
 #define ME_STATE_VERSION_STR ME_VERSION
-#ifdef _WIN32
+#ifdef ME_LIBRETRO
+static char *me_state_getcwd(char *b, size_t n) {
+    if (!b || !n) return NULL;
+    snprintf(b, n, "%s", g_guest_cwd[0] ? g_guest_cwd : ".");
+    return b;
+}
+static int me_state_chdir(const char *p) {
+    struct stat st;
+    if (!p || stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+    snprintf(g_guest_cwd, sizeof g_guest_cwd, "%s", p);
+    return 0;
+}
+#define ME_GETCWD(b, n) me_state_getcwd((b), (n))
+#define ME_CHDIR_S(p)   me_state_chdir(p)
+#elif defined(_WIN32)
 #include <direct.h>
 #include <io.h>
 #define ME_GETCWD(b, n) _getcwd(b, n)

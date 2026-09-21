@@ -55,6 +55,7 @@ static int setup(void **st) {
     snprintf(g_exe_dir, sizeof g_exe_dir, "%s", g_tmp);
     s_loaded = 0;                       /* the latch: without this only the first conf is read */
     memset(s_override, 0, sizeof s_override);
+    memset(s_runtime, 0, sizeof s_runtime);
     return 0;
 }
 
@@ -66,6 +67,7 @@ static int teardown(void **st) {
     join(p, sizeof p, g_tmp, "firmware");   rmdir(p);
     join(p, sizeof p, g_tmp, "cache");      rmdir(p);
     join(p, sizeof p, g_tmp, "elsewhere");  rmdir(p);
+    join(p, sizeof p, g_tmp, "runtime");    rmdir(p);
     rmdir(g_tmp);
     return 0;
 }
@@ -234,6 +236,30 @@ static void test_set_rejects_an_out_of_range_kind(void **st) {
     assert_int_equal(me_paths_set((me_path_kind)-1, "/tmp"), -1);
 }
 
+static void test_runtime_override_wins_without_persisting(void **st) {
+    (void)st;
+    char persisted[PATH_MAX], runtime[PATH_MAX], got[PATH_MAX];
+    join(persisted, sizeof persisted, g_tmp, "elsewhere");
+    join(runtime, sizeof runtime, g_tmp, "runtime");
+    assert_int_equal(me_paths_set(ME_PATH_CACHE, persisted), 0);
+    char before[2048]; snprintf(before, sizeof before, "%s", read_conf());
+
+    assert_int_equal(me_paths_set_runtime(ME_PATH_CACHE, runtime), 0);
+    me_paths_dir(ME_PATH_CACHE, got, sizeof got);
+    assert_string_equal(got, runtime);
+    assert_string_equal(read_conf(), before);
+
+    assert_int_equal(me_paths_set_runtime(ME_PATH_CACHE, NULL), 0);
+    me_paths_dir(ME_PATH_CACHE, got, sizeof got);
+    assert_string_equal(got, persisted);
+}
+
+static void test_runtime_override_rejects_an_out_of_range_kind(void **st) {
+    (void)st;
+    assert_int_equal(me_paths_set_runtime(ME_PATH_NKINDS, "/tmp"), -1);
+    assert_int_equal(me_paths_set_runtime((me_path_kind)-1, "/tmp"), -1);
+}
+
 static void test_reset_restores_every_default(void **st) {
     (void)st;
     char other[PATH_MAX], got[PATH_MAX], want[PATH_MAX];
@@ -331,6 +357,8 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_set_persists_and_takes_effect, setup, teardown),
         cmocka_unit_test_setup_teardown(test_set_empty_clears_the_override, setup, teardown),
         cmocka_unit_test_setup_teardown(test_set_rejects_an_out_of_range_kind, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_runtime_override_wins_without_persisting, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_runtime_override_rejects_an_out_of_range_kind, setup, teardown),
         cmocka_unit_test_setup_teardown(test_reset_restores_every_default, setup, teardown),
         cmocka_unit_test_setup_teardown(test_conf_parsing_skips_noise_and_strips_line_endings, setup, teardown),
         cmocka_unit_test_setup_teardown(test_conf_whitespace_handling_is_trailing_only, setup, teardown),

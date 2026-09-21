@@ -34,7 +34,10 @@ typedef struct _PROCESS_POWER_THROTTLING_STATE {
     ULONG Version; ULONG ControlMask; ULONG StateMask;
 } PROCESS_POWER_THROTTLING_STATE;
 #endif
+static int g_platform_initialized = 0;
 void me_platform_init(void) {
+    if (g_platform_initialized) return;
+    g_platform_initialized = 1;
     /* Fix up stdio ONLY when it's genuinely invalid. If stderr already has a valid handle -- a
        console-subsystem build (me_unicorn.exe, magiceyes-dev.exe) always does, and so does any
        launch with a redirect/pipe (`> log`, WSL interop) -- leave it alone, or we'd clobber the very
@@ -66,6 +69,11 @@ void me_platform_init(void) {
                      PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
     pt.StateMask = 0;
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+}
+
+void me_platform_shutdown(void) {
+    /* timeEndPeriod is process-wide. Balance it exactly once per embedded session. */
+    if (g_platform_initialized) { timeEndPeriod(1); g_platform_initialized = 0; }
 }
 
 void me_usleep(unsigned us) {

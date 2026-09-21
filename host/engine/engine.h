@@ -80,9 +80,11 @@ extern unsigned long g_n_rd, g_n_wr, g_n_fault;   /* hook-call profiling */
 void die(const char *m, uc_err e);
 void me_usleep(unsigned us);   /* sleep, low CPU (Windows usleep is ~15ms-granular) */
 void me_platform_init(void);   /* one-time host setup (Windows: timer res + no EcoQoS throttling) */
+void me_platform_shutdown(void); /* undo process-wide setup when embedded (otherwise a no-op) */
 
 /* ---- reset/reload (shared by GPEComp re-exec + File->Open hot reload) ---- */
 void engine_request_reload(const char *host_path);  /* viewer thread: stop+reset+load (threads.c) */
+void engine_request_shutdown(void);                 /* embedded frontend: stop every guest CPU */
 void engine_reload_in_syscall(const char *host_path);  /* execve chain-load (g_biglock held) */
 void engine_stop_all_threads(void);                 /* join every worker, close its uc (threads.c) */
 void mem_reset(void);                               /* free all guest-RAM host backing (mem.c) */
@@ -210,6 +212,7 @@ int dev_open(const char *path);
 void dev_close(int fd);
 int dev_type(int fd);
 void shm_setup(void);
+void shm_shutdown(void);
 void record_memmap(uint32_t phys, uint32_t guest, uint32_t len);
 int phys_to_guest(uint32_t phys, uint32_t *out);
 void present_guest(uint32_t g);
@@ -401,6 +404,7 @@ void *timer_thread(void *arg);
    mem_invalid_cb and never reach here.) ---- */
 struct me_fault { int faulted; uintptr_t pc; uintptr_t addr; };
 void guard_init(void);                 /* install handlers (Linux); Windows: timer/no-op */
+void guard_shutdown(void);             /* restore handlers before an embedded core unloads */
 int  guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f);  /* -1 on fault */
 int  guarded_present(void);            /* 0 ok, -1 if present faulted (frame skipped) */
 void guard_release_biglock(void);      /* unlock g_biglock iff the faulting thread held it */
@@ -419,12 +423,19 @@ extern char g_exe_dir[PATH_MAX];       /* dir of our own executable (rootfs defa
    Set by me_save_set_game() (loader); survive reloads (overwritten on each resolve_input). */
 extern char g_game_root[PATH_MAX];
 extern char g_save_root[PATH_MAX];
+extern char g_guest_cwd[PATH_MAX];
 void me_save_set_game(const char *elf_path);   /* derive g_game_root + g_save_root from the .gpe/ELF */
+void me_save_set_base(const char *path);       /* embedding override for the parent of saves/ */
 void syscalls_flush_all(void);                 /* fsync every tracked host fd (flush-on-quit) */
 /* Park an engine-owned host fd above the guest fd range, so a savestate restore can put every
    guest fd back on its original number without having to evict us. Best effort: returns the new
    fd, or the original one unchanged if it could not be moved. See syscalls.c. */
 int  me_fd_reserve_high(int fd);
 FILE *me_fopen_reserved(const char *path, const char *mode);   /* fopen + me_fd_reserve_high */
+
+#ifdef ME_LIBRETRO
+int me_engine_main(int argc, char **argv);
+extern volatile int g_engine_ready;   /* 0 loading, 1 runnable, -1 load failed */
+#endif
 
 #endif /* MAGICEYES_ENGINE_H */

@@ -73,6 +73,7 @@ static int emu_run(uc_engine *uc, uint32_t entry) {
 static __thread CONTEXT g_ctx;             /* captured arm point */
 static __thread volatile int g_returned = 0;  /* set by the handler -> "we faulted" on resume */
 static __thread volatile uintptr_t g_faddr = 0, g_fpc = 0;
+static PVOID g_veh_handle = NULL;
 
 static int is_fault_code(DWORD c) {
     return c == EXCEPTION_ACCESS_VIOLATION || c == EXCEPTION_IN_PAGE_ERROR ||
@@ -155,7 +156,12 @@ int guarded_ctl(void (*fn)(void *), void *arg) {
     return 0;
 }
 
-void guard_init(void) { AddVectoredExceptionHandler(1, veh); }
+void guard_init(void) {
+    if (!g_veh_handle) g_veh_handle = AddVectoredExceptionHandler(1, veh);
+}
+void guard_shutdown(void) {
+    if (g_veh_handle) { RemoveVectoredExceptionHandler(g_veh_handle); g_veh_handle = NULL; }
+}
 
 #else  /* ---- Linux: sigaction + per-thread siglongjmp ---- */
 #include <signal.h>
@@ -164,6 +170,7 @@ void guard_init(void) { AddVectoredExceptionHandler(1, veh); }
 static __thread sigjmp_buf g_fjmp;
 static __thread volatile uintptr_t g_faddr = 0;
 static struct sigaction g_old_segv, g_old_bus;
+static int g_handlers_installed = 0;
 
 static void fault_handler(int sig, siginfo_t *si, void *u) {
     (void)u;
@@ -177,6 +184,7 @@ static void fault_handler(int sig, siginfo_t *si, void *u) {
 }
 
 void guard_init(void) {
+    if (g_handlers_installed) return;
     /* One process-wide disposition covers every thread (SIGSEGV/SIGBUS are delivered to the
        faulting thread). We don't recover stack overflows, so no sigaltstack is needed -- a
        wild-pointer fault leaves the thread's normal stack usable for the handler + longjmp. */
@@ -186,6 +194,14 @@ void guard_init(void) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &g_old_segv);
     sigaction(SIGBUS, &sa, &g_old_bus);
+    g_handlers_installed = 1;
+}
+
+void guard_shutdown(void) {
+    if (!g_handlers_installed) return;
+    sigaction(SIGSEGV, &g_old_segv, NULL);
+    sigaction(SIGBUS, &g_old_bus, NULL);
+    g_handlers_installed = 0;
 }
 
 int guarded_emu_start(uc_engine *uc, uint32_t entry, struct me_fault *f) {

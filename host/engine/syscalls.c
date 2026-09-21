@@ -12,6 +12,11 @@
 #include "glcmd.h"     /* GL render-offload syscall numbers + descriptor */
 #include "hostabi.h"   /* open()/errno translation + the guest struct stat layouts */
 
+static char g_save_base[PATH_MAX];
+void me_save_set_base(const char *path) {
+    snprintf(g_save_base, sizeof g_save_base, "%s", path ? path : "");
+}
+
 /* Host scratch dir for decompressed GPEComp temps + extracted zips: the configured Cache dir
    (portable default <exe_dir>/cache; user-relocatable via the settings window). me_paths_dir
    mkdir-p's it. */
@@ -345,6 +350,15 @@ static void resolve_path(const char *guest, char *out, size_t cap) {
     if (me_mount_resolve(guest, out, cap)) return;
     if (me_rootfs_resolve(guest, out, cap)) return;
     rewrite_guest_path(guest, out, cap);
+#ifdef ME_LIBRETRO
+    /* The frontend owns the process cwd. Resolve relative guest paths against a virtual cwd
+       instead of calling chdir() in the process that loaded this core. */
+    int drive = (((out[0] >= 'a' && out[0] <= 'z') || (out[0] >= 'A' && out[0] <= 'Z')) && out[1] == ':');
+    if (out[0] != '/' && !drive && g_guest_cwd[0]) {
+        char rel[PATH_MAX]; snprintf(rel, sizeof rel, "%s", out);
+        snprintf(out, cap, "%s/%s", g_guest_cwd, rel);
+    }
+#endif
 }
 
 /* ---- persistent per-game save overlay ("set up saving properly") -----------------
@@ -373,6 +387,7 @@ void me_save_set_game(const char *elf_path) {
     if (realpath(dir, abs)) snprintf(g_game_root, sizeof g_game_root, "%s", abs);
 #endif
     else snprintf(g_game_root, sizeof g_game_root, "%s", dir);
+    snprintf(g_guest_cwd, sizeof g_guest_cwd, "%s", g_game_root);
     /* sanitise the stem into a filesystem-safe gamekey */
     char key[PATH_MAX]; int k = 0;
     for (const char *p = stem; *p && k < (int)sizeof key - 1; p++) {
@@ -382,7 +397,7 @@ void me_save_set_game(const char *elf_path) {
         key[k++] = ok ? c : '_';
     }
     key[k] = 0; if (!key[0]) snprintf(key, sizeof key, "game");
-    const char *base = g_exe_dir[0] ? g_exe_dir : ".";
+    const char *base = g_save_base[0] ? g_save_base : (g_exe_dir[0] ? g_exe_dir : ".");
     snprintf(g_save_root, sizeof g_save_root, "%s/saves/%s", base, key);
     if (g_trace) fprintf(stderr, "  [saves] game_root=%s save_root=%s\n", g_game_root, g_save_root);
 }
@@ -440,7 +455,12 @@ static int save_overlay_path(const char *guest, char *out, size_t cap) {
     if (norm[0] != '/' && !drive) {                  /* relative -> always game data */
         rel = norm;
         char cwd[PATH_MAX], cn[PATH_MAX];
+#ifdef ME_LIBRETRO
+        snprintf(cwd, sizeof cwd, "%s", g_guest_cwd);
+        if (cwd[0]) {
+#else
         if (getcwd(cwd, sizeof cwd)) {               /* refine: prefix cwd's offset within game dir */
+#endif
             norm_slashes(cwd, cn, sizeof cn);
             const char *sub = path_under(cn, gr);
             if (sub && sub[0]) { snprintf(relbuf, sizeof relbuf, "%s/%s", sub, norm); rel = relbuf; }
@@ -1364,11 +1384,23 @@ long sys_dispatch(uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2,
                    the game dir under /mnt/sd before exec'ing it */
         char p[1024]; read_cstr(a0, p, sizeof p);
         char rp[PATH_MAX]; resolve_path(p, rp, sizeof rp);
+#ifdef ME_LIBRETRO
+        struct stat st;
+        if (stat(rp, &st) != 0) return LERR(errno);
+        if (!S_ISDIR(st.st_mode)) return LERR(ENOTDIR);
+        snprintf(g_guest_cwd, sizeof g_guest_cwd, "%s", rp);
+        return 0;
+#else
         return chdir(rp) == 0 ? 0 : LERR(errno);
+#endif
     }
     case 183: {  /* getcwd(buf, size) -> bytes incl NUL, or -ERANGE */
         char cwd[PATH_MAX];
+#ifdef ME_LIBRETRO
+        snprintf(cwd, sizeof cwd, "%s", g_guest_cwd[0] ? g_guest_cwd : ".");
+#else
         if (!getcwd(cwd, sizeof cwd)) return LERR(errno);
+#endif
         size_t l = strlen(cwd) + 1;
         if (l > a1) return LERR(ERANGE);
         uc_mem_write(g_uc, a0, cwd, (uint32_t)l);

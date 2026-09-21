@@ -19,6 +19,7 @@ typedef enum { ME_PATH_SETTINGS, ME_PATH_FIRMWARE, ME_PATH_CACHE, ME_PATH_NKINDS
 void        me_paths_dir(me_path_kind k, char *out, size_t cap);     /* resolved (override|default), mkdir-p'd */
 void        me_paths_default(me_path_kind k, char *out, size_t cap); /* the portable default, ignoring overrides */
 int         me_paths_set(me_path_kind k, const char *dir);           /* set override ("" clears) + persist; 0 = ok */
+int         me_paths_set_runtime(me_path_kind k, const char *dir);   /* non-persistent embedding override */
 void        me_paths_reset(void);                                    /* all kinds back to portable default + persist */
 const char *me_paths_label(me_path_kind k);                          /* "Settings"/"Firmware"/"Cache" (UI label) */
 

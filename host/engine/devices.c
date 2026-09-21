@@ -61,7 +61,7 @@ int dev_type(int fd) {
 /* ---- shm framebuffer bridge to the native viewer (shared w/ the Wiz shim) ---- */
 gp2x_shm_t *g_shm = NULL;
 void shm_setup(void) {
-#ifdef ME_BUNDLED
+#if defined(ME_BUNDLED) || defined(ME_LIBRETRO)
     /* Single-process bundle: the viewer runs in this same process (a worker thread, see
        main.c), so g_shm is plain in-process memory -- no cross-process named mapping to
        mismatch on launch order/namespace/DACL. This is the intended single-process end state
@@ -90,6 +90,16 @@ void shm_setup(void) {
     g_shm = p; g_shm->buttons = 0; g_shm->quit = 0; g_shm->frame_seq = 0;
     g_shm->magic = GP2XSHM_MAGIC;
 #endif
+}
+
+void shm_shutdown(void) {
+    if (!g_shm) return;
+#if defined(ME_BUNDLED) || defined(ME_LIBRETRO)
+    munmap(g_shm, ALIGN_UP(sizeof(gp2x_shm_t)));
+#else
+    munmap(g_shm, sizeof(gp2x_shm_t));
+#endif
+    g_shm = NULL;
 }
 
 /* The fake-SDL shim does shm_open("/gp2x_fb") -> open("/dev/shm/gp2x_fb"), ftruncate, then
