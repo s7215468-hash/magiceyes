@@ -62,7 +62,9 @@ miniz implementation, with absolute paths and traversal entries rejected; no hos
 
 The reported geometry follows the active title if it changes resolution. The audio adapter clocks
 44.1 kHz output against the 60 Hz frontend cadence, retains samples a frontend only partially
-consumes, and keeps the guest-side mixer buffered instead of draining it in bursts.
+consumes, and keeps the guest-side mixer buffered instead of draining it in bursts. It normally
+prebuffers 20 ms; a short isolated write starts after at most three frontend callbacks rather than
+waiting forever for a cushion it will never reach.
 
 ## Save states
 
@@ -71,7 +73,9 @@ one stable serialization size for the entire content session, so the core advert
 96 MiB buffer and rejects a snapshot if it ever exceeds that bound. The unused portion is cleared
 for deterministic output. State files are staged briefly in `<save>/magiceyes/cache` because the
 native snapshot implementation is transactional and file-oriented; the staging file is removed
-after each operation and when content unloads.
+after each operation and when content unloads. Loading a state deliberately flushes frontend and
+source-ring audio, then lets the restored guest establish a fresh cushion; stale PCM from the
+abandoned timeline is never replayed. Version-1 libretro states remain loadable with the same flush.
 
 ## Current limitations
 
@@ -90,9 +94,10 @@ tools/test/libretro_smoke.sh GAME.gpe SYSTEM_DIR SAVE_DIR [SECOND_GAME.gpe]
 
 Set `ME_LIBRETRO_FAIL_FIRST=1`, `ME_LIBRETRO_PAUSE_TEST=1`,
 `ME_LIBRETRO_RESET_TEST=1`, `ME_LIBRETRO_STATE_TEST=1`,
+`ME_LIBRETRO_STATE_V1_TEST=1`,
 `ME_LIBRETRO_PARTIAL_AUDIO=1`, `ME_LIBRETRO_FASTFORWARD=1`,
 `ME_LIBRETRO_FASTFORWARD_TOGGLE=1` or `ME_LIBRETRO_ASYNC=1` to exercise failure recovery,
-frontend pausing, core reset, state round-tripping, partial audio consumption, sustained or
-on/off fast-forward, or asynchronous timing. `ME_LIBRETRO_RUNS=N` overrides the default 360
-callbacks for longer pacing checks. The harness rejects audio batches or cumulative output above
-the core's 44.1 kHz / 60 Hz budget.
+frontend pausing, core reset, current/legacy state round-tripping, partial audio consumption,
+sustained or on/off fast-forward, or asynchronous timing. `ME_LIBRETRO_RUNS=N` overrides the
+default 360 callbacks for longer pacing checks. The harness rejects audio batches or cumulative
+output above the core's 44.1 kHz / 60 Hz budget.

@@ -66,7 +66,11 @@ headers because `engine.h` includes them.
 | `test_ubifs.c` | the UBI + UBIFS reader, including zlib and LZO blocks |
 | `test_png_write.c` | the dependency-free PNG writer |
 | `test_state.c` | the savestate container: header, chunk framing, CRCs, deflate, the picker probe |
+| `test_libretro_audio.c` | libretro audio cadence, conversion, buffering and reset policy |
 | `test_posix_compat.c` | `pread`/`mmap`/`shm_open` over Win32 (**Windows only**) |
+
+The libretro audio clock lives in its own dependency-free module so every supported PCM shape and
+rate can be tested without a frontend, engine, firmware or game.
 
 The last three C modules were extracted out of `syscalls.c`, `devices.c`, `fpa.c` and
 `oabi_libm.c` so they could be reached at all. Each was pure logic sitting in a file that drives

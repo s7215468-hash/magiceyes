@@ -5,6 +5,7 @@
  * parks them cooperatively before returning; asynchronous mode preserves the original free-run
  * model. The frontend owns all host video, audio and input APIs in either mode. */
 #include "libretro.h"
+#include "audio.h"
 #include "engine.h"
 #include "paths.h"
 
@@ -12,10 +13,6 @@
 #define ME_VERSION "0.2.0-dev"
 #endif
 
-#define OUTPUT_RATE 44100u
-#define OUTPUT_FPS 60u
-#define MAX_AUDIO_OUT 16384u
-#define AUDIO_PREBUFFER_MS 20u
 #define FRAME_SECONDS (1.0 / 60.0)
 #define FASTFORWARD_RATE 4.0
 #define FASTFORWARD_BUDGET (FRAME_SECONDS / FASTFORWARD_RATE)
@@ -24,6 +21,7 @@
    device and adapter records fit below this with headroom. Oversize states fail explicitly. */
 #define LIBRETRO_STATE_BYTES (96u * 1024u * 1024u)
 #define LIBRETRO_STATE_HEADER 32u
+#define LIBRETRO_STATE_VERSION 2u
 
 static retro_environment_t environ_cb;
 static retro_video_refresh_t video_cb;
@@ -42,13 +40,7 @@ static volatile uint64_t run_heartbeat;
 static char content_path[PATH_MAX];
 static char engine_argv0[PATH_MAX];
 static char state_path[PATH_MAX];
-static uint64_t audio_phase;
-static uint32_t audio_budget_phase;
-static int16_t audio_out[MAX_AUDIO_OUT * 2];
-static size_t audio_pending;
-static int16_t audio_hold_l, audio_hold_r;
-static int audio_have_hold, audio_started;
-static uint32_t audio_seen_freq, audio_seen_fmt, audio_seen_channels;
+static me_lr_audio_t audio_state;
 static double paused_at;
 static int timing_synchronized = 1;
 static volatile int fastforward_active;
@@ -223,122 +215,20 @@ static void update_input(void) {
     g_shm->touch_down = (uint32_t)down;
 }
 
-static int16_t pcm_sample(const uint8_t *p, unsigned bits, int is_signed) {
-    if (bits == 8) return is_signed ? (int16_t)((int8_t)p[0] * 256)
-                                    : (int16_t)(((int)p[0] - 128) << 8);
-    uint16_t u = (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-    return is_signed ? (int16_t)u : (int16_t)((int)u - 32768);
-}
-
-static void reset_audio_stream(int reset_budget) {
-    audio_phase = 0;
-    audio_pending = 0;
-    audio_hold_l = audio_hold_r = 0;
-    audio_have_hold = audio_started = 0;
-    audio_seen_freq = audio_seen_fmt = audio_seen_channels = 0;
-    if (reset_budget) audio_budget_phase = 0;
-}
-
-static void submit_audio(void) {
-    if (!audio_pending) return;
-    if (audio_batch_cb != null_audio_batch) {
-        size_t used = audio_batch_cb(audio_out, audio_pending);
-        if (used > audio_pending) used = audio_pending;
-        if (used) {
-            audio_pending -= used;
-            if (audio_pending)
-                memmove(audio_out, audio_out + used * 2, audio_pending * 2 * sizeof *audio_out);
-        }
-    } else {
-        for (size_t i = 0; i < audio_pending; i++) audio_cb(audio_out[i*2], audio_out[i*2+1]);
-        audio_pending = 0;
-    }
-}
-
 static void drain_audio(void) {
-    uint32_t freq = g_shm->audio_freq;
-    unsigned ch = g_shm->audio_channels;
-    uint32_t fmt = g_shm->audio_format;
-    unsigned bits = fmt & 0xffu;
-    if (!g_shm->audio_active || !freq || (ch != 1 && ch != 2) ||
-        (bits != 8 && bits != 16)) {
-        reset_audio_stream(1);
-        return;
+    size_t pending = me_lr_audio_prepare(&audio_state, g_shm->aring, GP2XSHM_ARING,
+                                         &g_shm->a_read, g_shm->a_write,
+                                         g_shm->audio_active, g_shm->audio_freq,
+                                         g_shm->audio_format, g_shm->audio_channels);
+    if (!pending) return;
+    const int16_t *out = me_lr_audio_output(&audio_state);
+    if (audio_batch_cb != null_audio_batch) {
+        size_t used = audio_batch_cb(out, pending);
+        me_lr_audio_consume(&audio_state, used);
+    } else {
+        for (size_t i = 0; i < pending; i++) audio_cb(out[i*2], out[i*2+1]);
+        me_lr_audio_consume(&audio_state, pending);
     }
-    if (freq != audio_seen_freq || fmt != audio_seen_fmt || ch != audio_seen_channels) {
-        reset_audio_stream(0);
-        audio_seen_freq = freq;
-        audio_seen_fmt = fmt;
-        audio_seen_channels = ch;
-    }
-    /* A frontend may accept only part of a batch. Give it at most one batch per retro_run(),
-       and never consume more guest PCM while an older batch is still backpressured. */
-    if (audio_pending) {
-        submit_audio();
-        return;
-    }
-    unsigned bytes_per = bits / 8;
-    unsigned frame_bytes = ch * bytes_per;
-    uint32_t avail = g_shm->a_write - g_shm->a_read;
-    avail -= avail % frame_bytes;
-    /* Keep latency bounded after a slow frontend frame by dropping all but the newest 250ms. */
-    uint32_t keep = freq * frame_bytes / 4;
-    if (avail > keep) {
-        uint32_t drop = avail - keep;
-        drop -= drop % frame_bytes;
-        g_shm->a_read += drop;
-        avail -= drop;
-        /* The held sample preceded the retained tail and can no longer be repeated safely. */
-        audio_phase = 0;
-        audio_have_hold = 0;
-    }
-
-    /* Let the producer establish a small real-audio cushion before starting. From then on the
-       frontend receives one clocked batch per callback; only a genuine underrun is silenced. */
-    if (!audio_started) {
-        uint32_t prebuffer = freq * frame_bytes * AUDIO_PREBUFFER_MS / 1000u;
-        if (prebuffer < frame_bytes) prebuffer = frame_bytes;
-        prebuffer -= prebuffer % frame_bytes;
-        if (avail < prebuffer) return;
-        audio_started = 1;
-    }
-
-    audio_budget_phase += OUTPUT_RATE;
-    size_t target = audio_budget_phase / OUTPUT_FPS;
-    audio_budget_phase %= OUTPUT_FPS;
-    if (target > MAX_AUDIO_OUT) target = MAX_AUDIO_OUT;
-
-    uint32_t r = g_shm->a_read;
-    uint32_t source_frames = avail / frame_bytes;
-    size_t out_n = 0;
-    uint32_t used_source = 0;
-    int is_signed = (fmt & 0x8000u) != 0;
-    while (out_n < target) {
-        /* audio_phase is source time in OUTPUT_RATE units. Advance the held source sample
-           whenever the next output position crosses a source-frame boundary. Keeping the held
-           sample across callbacks avoids a click at odd batch boundaries when upsampling. */
-        while (!audio_have_hold || audio_phase >= OUTPUT_RATE) {
-            if (used_source >= source_frames) goto underrun;
-            uint8_t raw[4] = {0};
-            for (unsigned k = 0; k < frame_bytes; k++)
-                raw[k] = g_shm->aring[(r + used_source * frame_bytes + k) % GP2XSHM_ARING];
-            audio_hold_l = pcm_sample(raw, bits, is_signed);
-            audio_hold_r = ch == 2 ? pcm_sample(raw + bytes_per, bits, is_signed) : audio_hold_l;
-            used_source++;
-            if (audio_have_hold) audio_phase -= OUTPUT_RATE;
-            else audio_have_hold = 1;
-        }
-        audio_out[out_n * 2] = audio_hold_l;
-        audio_out[out_n * 2 + 1] = audio_hold_r;
-        out_n++;
-        audio_phase += freq;
-    }
-underrun:
-    g_shm->a_read = r + used_source * frame_bytes;
-    if (out_n < target)
-        memset(audio_out + out_n * 2, 0, (target - out_n) * 2 * sizeof *audio_out);
-    audio_pending = target;
-    submit_audio();
 }
 
 RETRO_API unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -392,7 +282,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info) {
     info->geometry.max_height = GP2XSHM_MAXH;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
     info->timing.fps = 60.0;
-    info->timing.sample_rate = OUTPUT_RATE;
+    info->timing.sample_rate = ME_LR_AUDIO_OUTPUT_RATE;
 }
 
 RETRO_API bool retro_load_game(const struct retro_game_info *game) {
@@ -443,7 +333,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     engine_thread_done = 0;
     g_engine_ready = 0;       /* clear the previous session before the new thread is scheduled */
     guest_clock_reset();
-    reset_audio_stream(1);
+    me_lr_audio_reset(&audio_state);
     video_width = video_height = 0;
     update_variables();
     dbg_set_quantum(timing_synchronized ? 50000 : 0);
@@ -494,7 +384,7 @@ RETRO_API void retro_unload_game(void) {
     shm_shutdown();
     engine_thread_valid = 0;
     engine_thread_done = 0;
-    reset_audio_stream(1);
+    me_lr_audio_reset(&audio_state);
     fastforward_active = 0;
     guest_clock_reset();
     dbg_set_quantum(0);
@@ -508,7 +398,7 @@ RETRO_API void retro_reset(void) {
     if (!engine_thread_valid || !content_path[0]) return;
     leave_fastforward();
     resume_guest();
-    reset_audio_stream(1);
+    me_lr_audio_reset(&audio_state);
     g_engine_ready = 0;
     engine_request_reload(content_path);
     for (int i = 0; i < 6000 && !engine_thread_done && g_engine_ready == 0; i++) me_usleep(10000);
@@ -610,8 +500,6 @@ static void put_u32(uint8_t *p, uint32_t v) {
 static uint32_t get_u32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-static void put_u64(uint8_t *p, uint64_t v) { put_u32(p, (uint32_t)v); put_u32(p + 4, (uint32_t)(v >> 32)); }
-
 RETRO_API size_t retro_serialize_size(void) { return LIBRETRO_STATE_BYTES; }
 
 RETRO_API bool retro_serialize(void *data, size_t size) {
@@ -628,8 +516,7 @@ RETRO_API bool retro_serialize(void *data, size_t size) {
     if (!f) return false;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); remove(state_path); return false; }
     long n = ftell(f);
-    if (n < 0 || (size_t)n + LIBRETRO_STATE_HEADER + audio_pending * 4 >
-                 LIBRETRO_STATE_BYTES) {
+    if (n < 0 || (size_t)n + LIBRETRO_STATE_HEADER > LIBRETRO_STATE_BYTES) {
         fclose(f); remove(state_path);
         core_log(RETRO_LOG_ERROR, "magiceyes: state exceeds the %u MiB libretro limit\n",
                  LIBRETRO_STATE_BYTES / (1024u * 1024u));
@@ -639,12 +526,11 @@ RETRO_API bool retro_serialize(void *data, size_t size) {
     uint8_t *out = data;
     memset(out, 0, LIBRETRO_STATE_BYTES);
     memcpy(out, "MELRSTA", 7);
-    put_u32(out + 8, 1);
+    put_u32(out + 8, LIBRETRO_STATE_VERSION);
     put_u32(out + 12, (uint32_t)n);
-    put_u64(out + 16, audio_phase);
-    put_u32(out + 24, (uint32_t)audio_pending);
-    memcpy(out + LIBRETRO_STATE_HEADER, audio_out, audio_pending * 4);
-    size_t off = LIBRETRO_STATE_HEADER + audio_pending * 4;
+    /* Version 2 explicitly flushes frontend/source audio on load. Bytes 16..31 stay reserved;
+       version 1 used them for resampler phase and a pending frontend batch. */
+    size_t off = LIBRETRO_STATE_HEADER;
     bool ok = fread(out + off, 1, (size_t)n, f) == (size_t)n;
     fclose(f); remove(state_path);
     return ok;
@@ -653,10 +539,13 @@ RETRO_API bool retro_serialize(void *data, size_t size) {
 RETRO_API bool retro_unserialize(const void *data, size_t size) {
     if (!data || size < LIBRETRO_STATE_HEADER || !engine_thread_valid || !state_path[0]) return false;
     const uint8_t *in = data;
-    if (memcmp(in, "MELRSTA", 7) || get_u32(in + 8) != 1) return false;
+    uint32_t version = get_u32(in + 8);
+    if (memcmp(in, "MELRSTA", 7) || (version != 1 && version != LIBRETRO_STATE_VERSION))
+        return false;
     uint32_t n = get_u32(in + 12), pending = get_u32(in + 24);
+    if (version == LIBRETRO_STATE_VERSION && pending != 0) return false;
     size_t off = LIBRETRO_STATE_HEADER + (size_t)pending * 4;
-    if (pending > MAX_AUDIO_OUT || off > size || n > size - off) return false;
+    if (pending > ME_LR_AUDIO_MAX_OUTPUT || off > size || n > size - off) return false;
     FILE *f = fopen(state_path, "wb");
     int write_ok = f && fwrite(in + off, 1, n, f) == n;
     if (f && fclose(f) != 0) write_ok = 0;
@@ -682,11 +571,9 @@ RETRO_API bool retro_unserialize(const void *data, size_t size) {
         core_log(RETRO_LOG_ERROR, "magiceyes: unserialize did not complete\n");
         return false;
     }
-    /* Device restore deliberately discards queued ring PCM, so restart source-side resampling
-       after the already-normalized frontend batch saved below has been accepted. */
-    reset_audio_stream(1);
-    audio_pending = pending;
-    memcpy(audio_out, in + LIBRETRO_STATE_HEADER, audio_pending * 4);
+    /* Device restore discards queued ring PCM. Discard version 1's pending frontend batch too:
+       it belongs to the abandoned timeline. The restored guest will establish a fresh cushion. */
+    me_lr_audio_reset(&audio_state);
     return true;
 }
 RETRO_API void retro_cheat_reset(void) {}

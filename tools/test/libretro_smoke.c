@@ -67,6 +67,15 @@ static int16_t RETRO_CALLCONV input_state(unsigned p, unsigned d, unsigned i, un
     (void)p; (void)d; (void)i; (void)id; return 0;
 }
 
+static uint32_t get_u32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static void put_u32(unsigned char *p, uint32_t v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
 #define LOAD(name) do { *(void **)(&name) = dlsym(lib, #name); \
     if (!(name)) { fprintf(stderr, "missing %s\n", #name); return 2; } } while (0)
 
@@ -116,11 +125,23 @@ int main(int argc, char **argv) {
                 (getenv("ME_LIBRETRO_FASTFORWARD_TOGGLE") && i >= 120 && i < 240);
             retro_run();
             if (i == 180 && getenv("ME_LIBRETRO_RESET_TEST")) retro_reset();
-            if (i == 180 && getenv("ME_LIBRETRO_STATE_TEST")) {
+            if (i == 180 && (getenv("ME_LIBRETRO_STATE_TEST") ||
+                             getenv("ME_LIBRETRO_STATE_V1_TEST"))) {
                 state_size = retro_serialize_size();
                 state = malloc(state_size);
                 if (!state || !retro_serialize(state, state_size)) {
                     fprintf(stderr, "serialize failed (%zu bytes)\n", state_size); return 1;
+                }
+                if (getenv("ME_LIBRETRO_STATE_V1_TEST")) {
+                    unsigned char *p = state;
+                    uint32_t body = get_u32(p + 12);
+                    if ((size_t)body + 40 > state_size) {
+                        fprintf(stderr, "state too large for v1 compatibility fixture\n"); return 1;
+                    }
+                    memmove(p + 40, p + 32, body);
+                    put_u32(p + 8, 1);  /* old adapter-state version */
+                    put_u32(p + 24, 2); /* two stale stereo frames, discarded on load */
+                    memset(p + 32, 0x5a, 8);
                 }
             }
             if (i == 240 && state) {

@@ -5,7 +5,7 @@ platform ?= unix
 
 CORE_SOURCES := $(wildcard host/engine/*.c) \
                 $(wildcard host/engine/extract/*.c) \
-                host/state_file.c host/libretro/libretro.c
+                host/state_file.c host/libretro/audio.c host/libretro/libretro.c
 CORE_INCLUDES := -Ihost/libretro -Ihost/engine -Ihost/engine/extract -Ihost \
                  -Iguest/src -I$(ME_UNICORN_FORK)/include
 CORE_FLAGS := -O2 -Wall -Wextra -fvisibility=hidden -DME_LIBRETRO
@@ -35,7 +35,8 @@ endif
 .PHONY: all clean
 all: $(TARGET)
 
-$(TARGET): $(CORE_SOURCES) host/libretro/libretro.h host/libretro/libretro.map $(UNICORN_LIB)
+$(TARGET): $(CORE_SOURCES) host/libretro/audio.h host/libretro/libretro.h \
+           host/libretro/libretro.map $(UNICORN_LIB)
 	$(CC) $(CORE_FLAGS) $(CORE_INCLUDES) $(SHARED_FLAGS) -o $@ \
 		$(CORE_SOURCES) $(UNICORN_LIB) $(CORE_LIBS)
 
