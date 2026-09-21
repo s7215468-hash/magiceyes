@@ -6,6 +6,14 @@ per-title rendering/audio bugs, a few feature gaps, and infra/packaging polish.
 
 ## Open per-title bugs (native Windows engine unless noted)
 
+- **Deicide 3 (Wiz) — static audio in the libretro core.** The native emulator previously fixed
+  this title's audio, so treat the core behavior as a regression. Compare libretro audio-ring,
+  guest-clock and fast-forward pacing against the known-good native path before changing the
+  device model.
+- **Propis (Caanoo) — extremely slow gameplay in the libretro core.** Gameplay runs at the
+  expected speed in the previously-fixed native emulator, so investigate this as a core timing
+  regression. Compare synchronized-frame scheduling, guest sleeps/timers and Caanoo GPU pacing
+  with the native path.
 - **Patissier — incorrect rendering (EABI, still on the shim).** Renders wrong / green screen via
   the EABI rootfs shim. The real-libSDL switch is OABI-only so far; EABI has no prebuilt real libSDL
   (see `third_party/README.md` "EABI: deferred").
