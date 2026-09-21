@@ -35,6 +35,7 @@ static int me_state_chdir(const char *p) {
 
 char g_restore_path[PATH_MAX] = {0};
 volatile uint32_t g_state_epoch = 0;
+volatile int g_state_pause_after_restore = 0;
 
 /* The saved guest clock, handed from a validated file to engine_restore_state so the skew can be
    applied before anything consults the clock. */
@@ -741,7 +742,8 @@ uint32_t engine_restore_state_apply(const char *path) {
        having executed nothing at all -- which is the only way to observe the restored machine
        exactly as it was captured (a running one has already moved on by the time anything can
        look at it). Also what you want from a debugger: load a state, then step from there. */
-    if (getenv("ME_STATE_PAUSE_AFTER_RESTORE")) {
+    if (g_state_pause_after_restore || getenv("ME_STATE_PAUSE_AFTER_RESTORE")) {
+        g_state_pause_after_restore = 0;
         int p = 0, b = 0, rn = 0;
         dbg_pause(1, &p, &b, &rn);
     }

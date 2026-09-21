@@ -43,18 +43,38 @@ The core asks the frontend for its System and Save directories. Its layout is:
 Static GP2X games need no system files. As with the standalone build, firmware and games are not
 distributed with magiceyes.
 
-The initial core accepts `.gpe` and `.zip` by full path. Zip extraction currently uses the same
-host `unzip`/`tar` path as the standalone engine, so raw `.gpe` content is recommended on hosts
-without those tools.
+The core accepts `.gpe` and `.zip` by full path. Zip files are extracted by the core's vendored
+miniz implementation, with absolute paths and traversal entries rejected; no host `unzip` or
+`tar` executable is needed.
+
+## Core options
+
+- **Timing model — Synchronized (default):** `retro_run()` grants the guest one 60 Hz slice and
+  stops guest CPU execution before returning. Pausing or frame-advancing the frontend therefore
+  does not let the guest run ahead. During frontend fast-forward, each callback still advances
+  guest time by one frame while the CPU slice uses a shorter wall-time budget.
+- **Timing model — Asynchronous:** preserves the standalone engine's free-running behavior. A
+  watchdog still parks the guest when frontend callbacks stop. This can be useful for diagnosing
+  a title that depends on unusual host timing.
+- **Pointer/touch input:** enables or disables mapping libretro pointer coordinates to the
+  emulated touchscreen.
+
+The reported geometry follows the active title if it changes resolution. The audio adapter also
+retains samples a frontend only partially consumes instead of dropping the remainder.
+
+## Save states
+
+Frontend save and load state operations wrap the native `.mst` snapshot format. Libretro requires
+one stable serialization size for the entire content session, so the core advertises a fixed
+96 MiB buffer and rejects a snapshot if it ever exceeds that bound. The unused portion is cleared
+for deterministic output. State files are staged briefly in `<save>/magiceyes/cache` because the
+native snapshot implementation is transactional and file-oriented; the staging file is removed
+after each operation and when content unloads.
 
 ## Current limitations
 
-- The engine is asynchronous internally. Each `retro_run()` publishes the newest completed frame;
-  a watchdog parks guest CPUs when the frontend stops calling it, but frame advance and
-  fast-forward timing are not yet exact.
-- Frontend save states are disabled. The native `.mst` implementation is file-oriented and its
-  state size can grow after content load, which does not meet libretro's serialization contract.
-- Rewind, runahead and deterministic netplay are consequently unsupported.
+- Save states are large, so rewind and runahead have substantial memory and compression overhead.
+- Deterministic netplay has not been validated.
 - The first supported targets are 64-bit desktop Linux and Windows.
 
 ## Smoke test
@@ -66,5 +86,8 @@ delivery, PCM delivery and clean unload without requiring RetroArch:
 tools/test/libretro_smoke.sh GAME.gpe SYSTEM_DIR SAVE_DIR [SECOND_GAME.gpe]
 ```
 
-Set `ME_LIBRETRO_FAIL_FIRST=1`, `ME_LIBRETRO_PAUSE_TEST=1` or
-`ME_LIBRETRO_RESET_TEST=1` to exercise failure recovery, frontend pausing or core reset.
+Set `ME_LIBRETRO_FAIL_FIRST=1`, `ME_LIBRETRO_PAUSE_TEST=1`,
+`ME_LIBRETRO_RESET_TEST=1`, `ME_LIBRETRO_STATE_TEST=1`,
+`ME_LIBRETRO_PARTIAL_AUDIO=1`, `ME_LIBRETRO_FASTFORWARD=1` or `ME_LIBRETRO_ASYNC=1` to exercise
+failure recovery, frontend pausing, core reset, state round-tripping, partial audio consumption,
+fast-forward or asynchronous timing.

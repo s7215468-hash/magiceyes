@@ -94,6 +94,10 @@ extern char g_restore_path[];
    event it can wait for (ctl status reports it as state_epoch). */
 extern volatile uint32_t g_state_epoch;
 
+/* Embedders that must return from a restore with the machine still stopped set this before
+   me_state_request_restore(). The restore consumes it after rebuilding every CPU. */
+extern volatile int g_state_pause_after_restore;
+
 /* Convenience wrappers over the slot layout: <exe_dir>/states/<gamekey>/state-<slot>.mst for the
    RUNNING title. Return non-zero on failure with `err` filled. */
 int me_state_save_slot(int slot, char *err, size_t ecap);

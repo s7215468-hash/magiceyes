@@ -204,7 +204,7 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
             if (tsp) { uint32_t t[2] = { (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec * 1000 }; uc_mem_write(uc, tsp, t, 8); } }
         gwrite(UC_ARM_REG_R0, 0);
         dbg_enter_tcg();
-        if (g_dbg_armed && dbg_stop_pending()) uc_emu_stop(uc);
+        if (g_dbg_armed && dbg_stop_pending()) { dbg_mark_pause_stop(); uc_emu_stop(uc); }
         return;
     }
     BIGLOCK_LOCK();
@@ -233,7 +233,8 @@ void intr_cb(uc_engine *uc, uint32_t intno, void *user) {
     /* Stopping here is what makes a thread that was blocked in a long syscall park as soon as it
        returns, with no code hook and no polling. */
     dbg_enter_tcg();
-    if (g_exit || (g_dbg_armed && dbg_stop_pending())) uc_emu_stop(uc);
+    if (g_exit) uc_emu_stop(uc);
+    else if (g_dbg_armed && dbg_stop_pending()) { dbg_mark_pause_stop(); uc_emu_stop(uc); }
 }
 
 /* host helper thread: present the framebuffer + prof + thread dump, off the guest CPUs. */
@@ -805,12 +806,19 @@ int main(int argc, char **argv) {
                                                   helper thread's shm poll, or the ctl channel */
             char sp[PATH_MAX]; snprintf(sp, sizeof sp, "%s", g_restore_path); g_restore_path[0] = 0;
             entry = engine_restore_state(sp);
+#ifdef ME_LIBRETRO
+            g_state_pause_after_restore = 0;   /* also clear it when restore failed before apply */
+            g_engine_ready = entry ? 1 : -1;
+#endif
             continue;
         }
         if (g_reload_path[0]) {                /* GPEComp re-exec or File->Open */
             char path[PATH_MAX]; snprintf(path, sizeof path, "%s", g_reload_path); g_reload_path[0] = 0;
             entry = engine_reset_and_load(path);
             if (!entry) fprintf(stderr, "magiceyes: reload of '%s' failed\n", path);
+#ifdef ME_LIBRETRO
+            g_engine_ready = entry ? 1 : -1;
+#endif
             continue;
         }
         if (!entry) me_usleep(16000);          /* idle: wait for File->Open or the window to close */

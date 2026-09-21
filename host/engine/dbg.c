@@ -18,8 +18,10 @@ static pthread_cond_t  g_dbg_cv   = PTHREAD_COND_INITIALIZER;   /* parked thread
 static pthread_cond_t  g_dbg_ack  = PTHREAD_COND_INITIALIZER;   /* dbg_pause waits here */
 
 static volatile int g_dbg_stop = 0;        /* stop-the-world requested */
+static volatile unsigned g_quantum = 0;
 static int g_state[MAXTH];                 /* DTH_* per thread slot */
 static int g_step[MAXTH];                  /* pending single-steps per thread slot */
+static volatile int g_pause_kicked[MAXTH]; /* uc_emu_stop was debugger-induced */
 static struct dbg_stop g_last;
 
 struct bp { int id; uint32_t addr; int used; };
@@ -55,6 +57,18 @@ static int self_idx(void) {
 
 int dbg_stop_pending(void) { return g_dbg_stop; }
 int dbg_is_paused(void)    { return g_dbg_stop; }
+void dbg_set_quantum(unsigned instructions) { g_quantum = instructions; }
+unsigned dbg_quantum(void) { return g_quantum; }
+int dbg_consume_pause_stop(void) {
+    int i = self_idx();
+    if (i < 0 || !g_pause_kicked[i]) return 0;
+    g_pause_kicked[i] = 0;
+    return 1;
+}
+void dbg_mark_pause_stop(void) {
+    int i = self_idx();
+    if (i >= 0) g_pause_kicked[i] = 1;
+}
 
 void dbg_enter_tcg(void) { int i = self_idx(); if (i >= 0) g_state[i] = DTH_TCG; }
 void dbg_leave_tcg(void) { int i = self_idx(); if (i >= 0) g_state[i] = DTH_SYSCALL; }
@@ -79,6 +93,7 @@ static void bp_cb(uc_engine *uc, uint64_t addr, uint32_t size, void *user) {
     for (int i = 0; i < MAXBP; i++)
         if (g_bp[i].used && g_bp[i].addr == (uint32_t)addr) { g_last.id = g_bp[i].id; break; }
     g_dbg_stop = 1;
+    dbg_mark_pause_stop();
     uc_emu_stop(uc);     /* emu_run then parks us at the park point */
 }
 
@@ -93,6 +108,7 @@ static void wp_cb(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
         if (g_wp[i].used && (uint32_t)addr >= g_wp[i].addr &&
             (uint32_t)addr < g_wp[i].addr + g_wp[i].len) { g_last.id = g_wp[i].id; break; }
     g_dbg_stop = 1;
+    dbg_mark_pause_stop();
     uc_emu_stop(uc);
 }
 
@@ -214,8 +230,15 @@ static int dbg_stop_world(int timeout_ms, int all_parked,
            loses the race. Rate-limited so this stays cheap while we spin. */
         if (host_now() >= next_kick) {
             next_kick = host_now() + 0.01;
-            for (int i = 0; i < g_nth; i++)
-                if (g_th[i].uc && g_th[i].state != TH_DEAD) uc_emu_stop(g_th[i].uc);
+            /* In cooperative mode every uc_emu_start returns at the configured instruction count,
+               so the CPU reaches dbg_park without a cross-thread uc_emu_stop. Unicorn tolerates
+               occasional debugger kicks, but doing one every video frame is not a safe clock. */
+            if (!g_quantum)
+                for (int i = 0; i < g_nth; i++)
+                    if (g_th[i].uc && g_th[i].state != TH_DEAD && g_state[i] == DTH_TCG) {
+                        g_pause_kicked[i] = 1;
+                        uc_emu_stop(g_th[i].uc);
+                    }
             futex_wake_all();
             engine_wake_sigwaiters();
         }
@@ -419,6 +442,7 @@ void dbg_reset(void) {
     memset(g_wp, 0, sizeof g_wp);
     memset(g_state, 0, sizeof g_state);
     memset(g_step, 0, sizeof g_step);
+    memset((void *)g_pause_kicked, 0, sizeof g_pause_kicked);
     memset(g_slot, 0, sizeof g_slot);   /* the ucs themselves are already closed by the caller */
     memset(&g_last, 0, sizeof g_last);
     g_epoch = 0;

@@ -51,11 +51,21 @@ static int emu_run(uc_engine *uc, uint32_t entry) {
             g_armed = 1;
             if (!cont) return UC_ERR_OK;
         }
-        e = (int)uc_emu_start(uc, pc, 0, 0, 0);
+        unsigned quantum = dbg_quantum();
+        e = (int)uc_emu_start(uc, pc, 0, 0, quantum);
+        int pause_stop = dbg_consume_pause_stop();
         if (g_exit || g_shutdown) break;
         if (g_fpa_resume && e == UC_ERR_OK) { uc_reg_read(uc, UC_ARM_REG_PC, &pc); continue; }
         if (e != UC_ERR_OK) break;
-        if (!g_dbg_armed || !dbg_stop_pending()) break;   /* a genuine end of run */
+        if (quantum) {
+            /* An instruction-count yield is not the end of the guest. A pause request is
+               noticed at the park point at the top of the loop; otherwise resume at this PC. */
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            continue;
+        }
+        if (!pause_stop && (!g_dbg_armed || !dbg_stop_pending())) {
+            break;
+        }
         /* Stopped by a breakpoint/watchpoint/pause: re-enter where we left off after parking. */
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
     }

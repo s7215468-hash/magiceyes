@@ -32,8 +32,14 @@ enum retro_environment_cmd {
     RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY = 9,
     RETRO_ENVIRONMENT_SET_PIXEL_FORMAT = 10,
     RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS = 11,
+    RETRO_ENVIRONMENT_GET_VARIABLE = 15,
+    RETRO_ENVIRONMENT_SET_VARIABLES = 16,
+    RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE = 17,
     RETRO_ENVIRONMENT_GET_LOG_INTERFACE = 27,
     RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY = 31,
+    RETRO_ENVIRONMENT_SET_CONTROLLER_INFO = 35,
+    RETRO_ENVIRONMENT_SET_GEOMETRY = 37,
+    RETRO_ENVIRONMENT_GET_FASTFORWARDING = 49,
     RETRO_ENVIRONMENT_GET_INPUT_BITMASKS = 51
 };
 
@@ -115,6 +121,18 @@ struct retro_game_info {
 struct retro_input_descriptor {
     unsigned port, device, index, id;
     const char *description;
+};
+struct retro_variable {
+    const char *key;
+    const char *value;
+};
+struct retro_controller_description {
+    const char *desc;
+    unsigned id;
+};
+struct retro_controller_info {
+    const struct retro_controller_description *types;
+    unsigned num_types;
 };
 struct retro_game_info_ext;
 

@@ -8,6 +8,7 @@
  * offline (gpecomp.c) to the scratch dir and runs that static binary instead. */
 #include "engine.h"
 #include "gpecomp.h"
+#include "extract/miniz.h"
 #include <dirent.h>
 #include <ctype.h>
 #ifdef _WIN32
@@ -512,30 +513,101 @@ static const char *resolve_dir(const char *dir, char *out, size_t cap) {
     return finalize(gl.paths[pick], out, cap);
 }
 
-/* Extract a .zip into the host scratch dir (cached: skip if it already holds a .gpe). Uses the
-   OS unzip (bsdtar `tar` ships with Windows 10/11; `unzip` on Linux) -- no extra DLL dependency. */
+/* Reject absolute paths, drive paths and traversal rather than "normalising" them. Archive
+   extraction operates on untrusted filenames, so ../ must never be allowed to escape the cache
+   root even when it would later collapse back underneath it. */
+static int zip_member_path(const char *name, char *out, size_t cap) {
+    if (!name || !*name || name[0] == '/' || name[0] == '\\' ||
+        (isalpha((unsigned char)name[0]) && name[1] == ':')) return -1;
+    char tmp[PATH_MAX];
+    if (strlen(name) >= sizeof tmp) return -1;
+    snprintf(tmp, sizeof tmp, "%s", name);
+    for (char *p = tmp; *p; p++) if (*p == '\\') *p = '/';
+    size_t used = 0;
+    for (char *p = tmp; *p;) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        char *end = strchr(p, '/');
+        if (end) *end = 0;
+        if (!strcmp(p, "..")) return -1;
+        if (strcmp(p, ".")) {
+            int n = snprintf(out + used, cap - used, "%s%s", used ? "/" : "", p);
+            if (n < 0 || (size_t)n >= cap - used) return -1;
+            used += (size_t)n;
+        }
+        if (!end) break;
+        p = end + 1;
+    }
+    return used ? 0 : 1;     /* a harmless root entry such as "./" */
+}
+
+static int zip_extract_in_process(const char *zip, const char *dest) {
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_reader_init_file(&z, zip, 0)) return -1;
+    int rc = 0;
+    mz_uint nfiles = mz_zip_reader_get_num_files(&z);
+    for (mz_uint i = 0; i < nfiles; i++) {
+        mz_zip_archive_file_stat st;
+        memset(&st, 0, sizeof st);
+        char rel[PATH_MAX], path[PATH_MAX];
+        if (!mz_zip_reader_file_stat(&z, i, &st)) {
+            fprintf(stderr, "magiceyes: could not read zip member %u\n", i);
+            rc = -1; break;
+        }
+        int path_rc = zip_member_path(st.m_filename, rel, sizeof rel);
+        if (path_rc > 0 && st.m_is_directory) continue;
+        if (path_rc != 0) {
+            fprintf(stderr, "magiceyes: unsafe or invalid zip member '%s'\n",
+                    st.m_filename[0] ? st.m_filename : "(unknown)");
+            rc = -1; break;
+        }
+        if (snprintf(path, sizeof path, "%s/%s", dest, rel) >= (int)sizeof path) {
+            rc = -1; break;
+        }
+        if (st.m_is_directory) { me_mkdirs(path); continue; }
+        char parent[PATH_MAX]; snprintf(parent, sizeof parent, "%s", path);
+        char *slash = strrchr(parent, '/');
+        if (slash) { *slash = 0; me_mkdirs(parent); }
+        if (!mz_zip_reader_extract_to_file(&z, i, path, 0)) {
+            fprintf(stderr, "magiceyes: failed to extract zip member '%s'\n", st.m_filename);
+            rc = -1; break;
+        }
+    }
+    mz_zip_reader_end(&z);
+    return rc;
+}
+
+/* Extract a .zip into the host scratch dir using the already-vendored miniz implementation.
+   A completion marker prevents a failed/partial extraction from being mistaken for a cache hit. */
 static int extract_zip(const char *zip, char *destbuf, size_t cap) {
     char base[PATH_MAX]; me_host_tmpdir(base, sizeof base);
     const char *s1 = strrchr(zip, '/'), *s2 = strrchr(zip, '\\');
     const char *name = s1 > s2 ? s1 + 1 : (s2 ? s2 + 1 : zip);
     char stem[PATH_MAX]; snprintf(stem, sizeof stem, "%s", name);
     char *dot = strrchr(stem, '.'); if (dot) *dot = 0;
-    snprintf(destbuf, cap, "%s/%s", base, stem);
+    int dn = snprintf(destbuf, cap, "%s/%s", base, stem);
+    if (dn < 0 || (size_t)dn >= cap) return -1;
 
-    struct stat ds;
-    if (!stat(destbuf, &ds) && S_ISDIR(ds.st_mode)) {   /* cached extraction */
+    char marker[PATH_MAX];
+    int mn = snprintf(marker, sizeof marker, "%s/.magiceyes-complete", destbuf);
+    if (mn < 0 || (size_t)mn >= sizeof marker) return -1;
+    struct stat ds, ms;
+    if (!stat(destbuf, &ds) && S_ISDIR(ds.st_mode) && !stat(marker, &ms)) {
         struct gpelist gl; gl.n = 0; scan_gpe(destbuf, 4, &gl);
         if (gl.n >= 1) return 0;
     }
-    LMKDIR(destbuf);
-    char cmd[PATH_MAX * 3];
-#ifdef _WIN32
-    snprintf(cmd, sizeof cmd, "tar -xf \"%s\" -C \"%s\"", zip, destbuf);
-#else
-    snprintf(cmd, sizeof cmd, "unzip -oq \"%s\" -d \"%s\"", zip, destbuf);
-#endif
-    int rc = system(cmd);
-    if (rc != 0) { fprintf(stderr, "magiceyes: failed to extract '%s' (exit %d)\n", zip, rc); return -1; }
+    me_mkdirs(destbuf);
+    remove(marker);
+    if (zip_extract_in_process(zip, destbuf) != 0) {
+        remove(marker);   /* the archive itself may have contained a file with this name */
+        fprintf(stderr, "magiceyes: failed to extract '%s'\n", zip);
+        return -1;
+    }
+    FILE *done = fopen(marker, "wb");
+    if (!done) return -1;
+    fputs("magiceyes zip cache v1\n", done);
+    if (fclose(done) != 0) return -1;
     return 0;
 }
 

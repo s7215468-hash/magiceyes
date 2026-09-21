@@ -43,6 +43,13 @@ struct dbg_stop {
 
 /* ---- called from the engine's hot paths ---- */
 int  dbg_stop_pending(void);              /* cheap: is a stop requested? */
+void dbg_set_quantum(unsigned instructions); /* 0 normally; cooperative slices for embedders */
+unsigned dbg_quantum(void);
+/* Consume the per-thread marker set when dbg_pause kicked this uc out of uc_emu_start. A resume
+   may race ahead of a syscall returning; this marker tells emu_run the return is still resumable
+   rather than a natural guest exit even if the global stop request has since been cleared. */
+int  dbg_consume_pause_stop(void);
+void dbg_mark_pause_stop(void);             /* current CPU is about to call uc_emu_stop for pause */
 void dbg_enter_tcg(void);                 /* intr_cb: returning to guest code */
 void dbg_leave_tcg(void);                 /* intr_cb: entered a syscall */
 /* A guest thread sitting in an INDEFINITE wait inside a syscall marks itself around the wait.
